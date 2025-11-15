@@ -32,6 +32,11 @@ fn main() {
     system.connect_agents("Researcher", "Analyst").unwrap();
     system.connect_agents("Analyst", "Coordinator").unwrap();
 
+    // Create a session for all agents
+    println!("Creating session 'main_session' for all agents...");
+    system.create_session("main_session".to_string()).unwrap();
+    println!("Active session: {:?}\n", system.get_active_session());
+
     // Demonstrate communication
     println!("Agent connections:");
     for agent in system.list_agents() {

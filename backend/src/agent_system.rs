@@ -1,10 +1,12 @@
 use crate::agent::Agent;
 use crate::message::Message;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Multi-agent system manager
 pub struct AgentSystem {
     agents: HashMap<String, Agent>,
+    session_ids: HashSet<String>,
+    active_session: Option<String>, // Single active session for the entire system
 }
 
 impl AgentSystem {
@@ -12,6 +14,8 @@ impl AgentSystem {
     pub fn new() -> Self {
         AgentSystem {
             agents: HashMap::new(),
+            session_ids: HashSet::new(),
+            active_session: None,
         }
     }
 
@@ -103,10 +107,15 @@ impl AgentSystem {
             return Err(format!("Agent '{}' is not connected to '{}'", from, to));
         }
 
+        // Get the recipient's active session
+        let session_id = self
+            .get_active_session()
+            .ok_or_else(|| format!("No active session for agent '{}'", to))?;
+
         let message = Message::new(from.to_string(), to.to_string(), content);
 
-        // Trigger the recipient's send_message handler
-        recipient.send_message(message.clone());
+        // Trigger the recipient's send_message handler with the active session
+        recipient.send_message(&session_id, message.clone())?;
 
         Ok(message)
     }
@@ -123,10 +132,16 @@ impl AgentSystem {
 
         for recipient_name in connections {
             if let Some(recipient) = self.agents.get(&recipient_name) {
-                let message =
-                    Message::new(from.to_string(), recipient_name.clone(), content.clone());
-                recipient.send_message(message.clone());
-                sent_messages.push(message);
+                // Get the recipient's active session
+                if let Some(session_id) = self.get_active_session() {
+                    let message =
+                        Message::new(from.to_string(), recipient_name.clone(), content.clone());
+
+                    // Only send if the recipient has an active session
+                    if recipient.send_message(&session_id, message.clone()).is_ok() {
+                        sent_messages.push(message);
+                    }
+                }
             }
         }
 
@@ -136,6 +151,73 @@ impl AgentSystem {
     /// Lists all agents in the system
     pub fn list_agents(&self) -> Vec<&Agent> {
         self.agents.values().collect()
+    }
+
+    /// Creates a session with the same ID for all agents
+    /// Sets this as the active session for the entire system
+    pub fn create_session(&mut self, session_id: String) -> Result<(), String> {
+        // Check if session already exists
+        if self.session_ids.contains(&session_id) {
+            return Err(format!("Session '{}' already exists", session_id));
+        }
+
+        // Create session for each existing agent with the same session_id
+        for (_agent_name, agent) in self.agents.iter() {
+            // Create session in the agent with the same ID
+            agent.create_session(session_id.clone())?;
+        }
+
+        // Add to system-wide session list (only once since all agents share it)
+        self.session_ids.insert(session_id.clone());
+
+        // Set as the active session for the entire system if no active session exists
+        if self.active_session.is_none() {
+            self.active_session = Some(session_id);
+        }
+
+        Ok(())
+    }
+
+    /// Sets the active session for the entire system
+    pub fn set_active_session(&mut self, session_id: String) -> Result<(), String> {
+        // Verify that the session exists
+        if !self.session_ids.contains(&session_id) {
+            return Err(format!("Session '{}' does not exist", session_id));
+        }
+
+        self.active_session = Some(session_id);
+        Ok(())
+    }
+
+    /// Gets the active session base ID
+    pub fn get_active_session(&self) -> Option<&String> {
+        self.active_session.as_ref()
+    }
+
+    /// Lists all session IDs in the system
+    pub fn list_all_sessions(&self) -> Vec<String> {
+        self.session_ids.iter().cloned().collect()
+    }
+
+    /// Removes a session from all agents
+    pub fn remove_session(&mut self, session_id: &str) -> Result<(), String> {
+        // Remove session from each agent
+        for (_agent_name, agent) in self.agents.iter() {
+            // Try to remove the session (ignore if it doesn't exist)
+            let _ = agent.remove_session(session_id);
+        }
+
+        // Remove from system-wide session list
+        self.session_ids.remove(session_id);
+
+        // If this was the active session, clear it
+        if let Some(active) = &self.active_session {
+            if active == session_id {
+                self.active_session = None;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -176,19 +258,15 @@ mod tests {
         system.add_agent(agent2).unwrap();
 
         // Should fail - not connected
-        assert!(
-            system
-                .send_message("Agent1", "Agent2", "Hello".to_string())
-                .is_err()
-        );
+        assert!(system
+            .send_message("Agent1", "Agent2", "Hello".to_string())
+            .is_err());
 
         // Connect and try again
         system.connect_agents("Agent1", "Agent2").unwrap();
-        assert!(
-            system
-                .send_message("Agent1", "Agent2", "Hello".to_string())
-                .is_ok()
-        );
+        assert!(system
+            .send_message("Agent1", "Agent2", "Hello".to_string())
+            .is_ok());
     }
 
     #[test]
