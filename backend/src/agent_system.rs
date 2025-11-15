@@ -105,8 +105,8 @@ impl AgentSystem {
 
         let message = Message::new(from.to_string(), to.to_string(), content);
 
-        // Trigger the recipient's on_message handler
-        recipient.on_message(&message);
+        // Trigger the recipient's send_message handler
+        recipient.send_message(message.clone());
 
         Ok(message)
     }
@@ -125,7 +125,7 @@ impl AgentSystem {
             if let Some(recipient) = self.agents.get(&recipient_name) {
                 let message =
                     Message::new(from.to_string(), recipient_name.clone(), content.clone());
-                recipient.on_message(&message);
+                recipient.send_message(message.clone());
                 sent_messages.push(message);
             }
         }

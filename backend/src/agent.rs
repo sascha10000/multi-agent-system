@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use crate::message::Message;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 /// Represents an agent with a name and role (prompt)
 #[derive(Debug, Clone)]
@@ -8,6 +8,7 @@ pub struct Agent {
     pub name: String,
     pub role: String,
     connections: Arc<Mutex<HashSet<String>>>,
+    message_stack: Arc<Mutex<VecDeque<Message>>>,
 }
 
 impl Agent {
@@ -17,6 +18,7 @@ impl Agent {
             name,
             role,
             connections: Arc::new(Mutex::new(HashSet::new())),
+            message_stack: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -44,10 +46,34 @@ impl Agent {
         connections.iter().cloned().collect()
     }
 
-    /// Handles incoming messages - to be implemented later
-    pub fn on_message(&self, message: &Message) {
+    /// Sends a message to this agent, managing the message stack
+    pub fn send_message(&self, message: Message) {
+        let mut stack = self.message_stack.lock().unwrap();
+
+        if stack.is_empty() {
+            // Stack is empty, process message directly without adding to stack
+            drop(stack); // Release the lock before calling on_message
+            self.on_message(&message);
+        } else {
+            // Stack has messages, add new message to back
+            stack.push_back(message);
+            // Take oldest message from front
+            if let Some(oldest_message) = stack.pop_front() {
+                drop(stack); // Release the lock before calling on_message
+                self.on_message(&oldest_message);
+            }
+        }
+    }
+
+    /// Handles incoming messages - to be implemented later (private)
+    /// In this function the basic logic will be triggered. Meaning how the agents talk to each
+    /// other and if they talk to each other.
+    async fn on_message(&self, message: &Message) {
         // Placeholder implementation
-        println!("[{}] Received message from {}: {}", self.name, message.from, message.content);
+        println!(
+            "[{}] Received message from {}: {}",
+            self.name, message.from, message.content
+        );
     }
 }
 
