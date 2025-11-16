@@ -162,6 +162,17 @@ impl Agent {
             Err(format!("Session '{}' not found", session_id))
         }
     }
+
+    /// Takes the join handle from a session, leaving None in its place
+    pub fn take_session_join_handle(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions
+            .get_mut(session_id)
+            .and_then(|session| session.take_join_handle())
+    }
 }
 
 #[cfg(test)]

@@ -69,6 +69,17 @@ async fn main() {
         Err(e) => println!("  ✗ Error: {}", e),
     }
 
-    // Give async tasks time to process messages
+    // Wait for async tasks to process messages
     println!("\nWaiting for message processing...");
+
+    // Give tasks a moment to process messages
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Wait for tasks to complete (this also removes the session to signal exit)
+    match system.wait_for_session_tasks("main_session").await {
+        Ok(_) => println!("Session processing complete!"),
+        Err(e) => println!("Warning: {}", e),
+    }
+
+    println!("\nDemo complete!");
 }

@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 use crate::message::Message;
+use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 
 /// Multi-agent system manager
@@ -221,6 +222,52 @@ impl AgentSystem {
         }
 
         Ok(())
+    }
+
+    /// Waits for all session processing tasks to complete
+    /// Takes ownership of the JoinHandles, removes the session (signaling tasks to exit),
+    /// and awaits them concurrently
+    pub async fn wait_for_session_tasks(&mut self, session_id: &str) -> Result<(), String> {
+        // Collect all join handles for this session BEFORE removing it
+        let mut handles = Vec::new();
+        for agent in self.agents.values() {
+            if let Some(handle) = agent.take_session_join_handle(session_id) {
+                handles.push(handle);
+            }
+        }
+
+        if handles.is_empty() {
+            return Err(format!(
+                "No active processing tasks found for session '{}'",
+                session_id
+            ));
+        }
+
+        println!("Waiting for {} processing tasks...", handles.len());
+
+        // Remove the session to signal tasks to exit
+        // TODO: The problem here is that the threads get basically killed eventhough it may be
+        // possible that there is still some message in the queue. This should just happen on exit.
+        self.remove_session(session_id)?;
+
+        // Wait for all handles
+        let results = join_all(handles).await;
+
+        // Check if any tasks panicked
+        let mut had_errors = false;
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                eprintln!("Task {} panicked: {:?}", i, e);
+                had_errors = true;
+            }
+        }
+
+        if had_errors {
+            Err("Some tasks panicked".to_string())
+        } else {
+            println!("All tasks completed successfully");
+            Ok(())
+        }
     }
 }
 
