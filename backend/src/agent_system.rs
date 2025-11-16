@@ -165,6 +165,9 @@ impl AgentSystem {
         for (_agent_name, agent) in self.agents.iter() {
             // Create session in the agent with the same ID
             agent.create_session(session_id.clone())?;
+            // Start the async message processing loop for this agent's session
+            let join_handle = agent.start_session(&session_id);
+            let _ = agent.set_session_join_handle(&session_id, join_handle);
         }
 
         // Add to system-wide session list (only once since all agents share it)
@@ -248,14 +251,17 @@ mod tests {
         assert!(system.add_agent(agent2).is_err());
     }
 
-    #[test]
-    fn test_message_requires_connection() {
+    #[tokio::test]
+    async fn test_message_requires_connection() {
         let mut system = AgentSystem::new();
         let agent1 = Agent::new("Agent1".to_string(), "Role1".to_string());
         let agent2 = Agent::new("Agent2".to_string(), "Role2".to_string());
 
         system.add_agent(agent1).unwrap();
         system.add_agent(agent2).unwrap();
+
+        // Create a session for the agents
+        system.create_session("test-session".to_string()).unwrap();
 
         // Should fail - not connected
         assert!(system
@@ -279,8 +285,8 @@ mod tests {
         assert!(system.get_agent("Agent1").is_none());
     }
 
-    #[test]
-    fn test_send_broadcast() {
+    #[tokio::test]
+    async fn test_send_broadcast() {
         let mut system = AgentSystem::new();
         let broadcaster = Agent::new("Broadcaster".to_string(), "Role1".to_string());
         let agent1 = Agent::new("Agent1".to_string(), "Role2".to_string());
@@ -291,6 +297,9 @@ mod tests {
         system.add_agent(agent1).unwrap();
         system.add_agent(agent2).unwrap();
         system.add_agent(agent3).unwrap();
+
+        // Create a session for the agents
+        system.create_session("test-session".to_string()).unwrap();
 
         // Connect broadcaster to agent1 and agent2, but not agent3
         system.connect_agents("Broadcaster", "Agent1").unwrap();

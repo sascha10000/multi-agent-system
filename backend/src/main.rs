@@ -1,6 +1,7 @@
 use multi_agent_backend::{Agent, AgentSystem};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Multi-Agent Backend System");
     println!("==========================\n");
 
@@ -20,7 +21,8 @@ fn main() {
 
     let coordinator = Agent::new(
         "Coordinator".to_string(),
-        "You are a coordinator agent. Your task is to manage and organize tasks between agents.".to_string(),
+        "You are a coordinator agent. Your task is to manage and organize tasks between agents."
+            .to_string(),
     );
 
     // Add agents to system
@@ -46,14 +48,27 @@ fn main() {
     println!("\nAttempting message passing:");
 
     // Valid message (connected agents)
-    match system.send_message("Researcher", "Analyst", "Here's my research data".to_string()) {
-        Ok(msg) => println!("  ✓ Message sent from {} to {}: {}", msg.from, msg.to, msg.content),
+    match system.send_message(
+        "Researcher",
+        "Analyst",
+        "Here's my research data".to_string(),
+    ) {
+        Ok(msg) => println!(
+            "  ✓ Message sent from {} to {}: {}",
+            msg.from, msg.to, msg.content
+        ),
         Err(e) => println!("  ✗ Error: {}", e),
     }
 
     // Invalid message (not connected)
     match system.send_message("Researcher", "Coordinator", "Hello".to_string()) {
-        Ok(msg) => println!("  ✓ Message sent from {} to {}: {}", msg.from, msg.to, msg.content),
+        Ok(msg) => println!(
+            "  ✓ Message sent from {} to {}: {}",
+            msg.from, msg.to, msg.content
+        ),
         Err(e) => println!("  ✗ Error: {}", e),
     }
+
+    // Give async tasks time to process messages
+    println!("\nWaiting for message processing...");
 }

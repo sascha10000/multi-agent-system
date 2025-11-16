@@ -36,12 +36,25 @@ impl SessionEntry {
 }
 
 /// Represents a session containing all messages and responses
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
     pub id: String,
     entries: Vec<SessionEntry>,
     message_stack: VecDeque<Message>,
     created_at: SystemTime,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        Session {
+            id: self.id.clone(),
+            entries: self.entries.clone(),
+            message_stack: self.message_stack.clone(),
+            created_at: self.created_at,
+            join_handle: None, // JoinHandle cannot be cloned
+        }
+    }
 }
 
 impl Session {
@@ -52,6 +65,7 @@ impl Session {
             entries: Vec::new(),
             message_stack: VecDeque::new(),
             created_at: SystemTime::now(),
+            join_handle: None,
         }
     }
 
@@ -113,6 +127,16 @@ impl Session {
     pub fn message_stack_size(&self) -> usize {
         self.message_stack.len()
     }
+
+    /// Sets the join handle for the session's processing task
+    pub fn set_join_handle(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.join_handle = Some(handle);
+    }
+
+    /// Takes the join handle, leaving None in its place
+    pub fn take_join_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.join_handle.take()
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +153,11 @@ mod tests {
     #[test]
     fn test_add_message() {
         let mut session = Session::new("test-session".to_string());
-        let message = Message::new("Agent1".to_string(), "Agent2".to_string(), "Hello".to_string());
+        let message = Message::new(
+            "Agent1".to_string(),
+            "Agent2".to_string(),
+            "Hello".to_string(),
+        );
 
         session.add_message(message);
         assert_eq!(session.entry_count(), 1);
@@ -138,7 +166,11 @@ mod tests {
     #[test]
     fn test_add_message_with_response() {
         let mut session = Session::new("test-session".to_string());
-        let message = Message::new("Agent1".to_string(), "Agent2".to_string(), "Hello".to_string());
+        let message = Message::new(
+            "Agent1".to_string(),
+            "Agent2".to_string(),
+            "Hello".to_string(),
+        );
 
         session.add_message_with_response(message, "Hi there!".to_string());
         assert_eq!(session.entry_count(), 1);
@@ -151,13 +183,20 @@ mod tests {
     #[test]
     fn test_set_last_response() {
         let mut session = Session::new("test-session".to_string());
-        let message = Message::new("Agent1".to_string(), "Agent2".to_string(), "Hello".to_string());
+        let message = Message::new(
+            "Agent1".to_string(),
+            "Agent2".to_string(),
+            "Hello".to_string(),
+        );
 
         session.add_message(message);
         assert!(session.get_entries()[0].response.is_none());
 
         session.set_last_response("Response!".to_string());
         assert!(session.get_entries()[0].response.is_some());
-        assert_eq!(session.get_entries()[0].response.as_ref().unwrap(), "Response!");
+        assert_eq!(
+            session.get_entries()[0].response.as_ref().unwrap(),
+            "Response!"
+        );
     }
 }

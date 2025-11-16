@@ -1,5 +1,6 @@
 use crate::message::Message;
 use crate::session::Session;
+use crate::{LLMChat, OllamaChat};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,63 @@ impl Agent {
             connections: Arc::new(Mutex::new(HashSet::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn start_session(&self, session_id: &str) -> tokio::task::JoinHandle<()> {
+        let c_session_id = session_id.to_string().clone();
+        let sessions = Arc::clone(&self.sessions);
+        let agent_name = self.name.clone();
+        let agent_role = self.role.clone();
+
+        tokio::spawn(async move {
+            loop {
+                // Lock, check for message, and release lock immediately
+                let message_opt = {
+                    let mut sessions_guard = sessions.lock().unwrap();
+                    if let Some(session) = sessions_guard.get_mut(&c_session_id) {
+                        session.pop_message_from_stack()
+                    } else {
+                        // Session doesn't exist, exit the loop
+                        break;
+                    }
+                };
+
+                // Process message outside the lock
+                if let Some(message) = message_opt {
+                    println!(
+                        "[{}] Received message from {}: {}",
+                        agent_name, message.from, message.content
+                    );
+
+                    // Create LLM client and process message
+                    let llm = OllamaChat::new(
+                        String::from("http://localhost:11434"),
+                        String::from("gemma3:4b"),
+                    );
+
+                    let result = llm
+                        .send_message_with_system(&agent_role, &message.content)
+                        .await;
+
+                    match result {
+                        Ok(response) => {
+                            println!("[{}] Generated response: {}", agent_name, response);
+                            // Store the message and response in the session
+                            let mut sessions_guard = sessions.lock().unwrap();
+                            if let Some(session) = sessions_guard.get_mut(&c_session_id) {
+                                session.add_message_with_response(message, response);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Error processing message: {}", agent_name, e);
+                        }
+                    }
+                }
+
+                // Sleep to prevent busy-waiting
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        })
     }
 
     /// Connects this agent to another agent
@@ -54,19 +112,8 @@ impl Agent {
             .get_mut(session_id)
             .ok_or_else(|| format!("Session '{}' not found", session_id))?;
 
-        if session.is_message_stack_empty() {
-            // Stack is empty, process message directly without adding to stack
-            drop(sessions); // Release the lock before calling on_message
-            self.on_message(&message);
-        } else {
-            // Stack has messages, add new message to back
-            session.push_message_to_stack(message);
-            // Take oldest message from front
-            if let Some(oldest_message) = session.pop_message_from_stack() {
-                drop(sessions); // Release the lock before calling on_message
-                self.on_message(&oldest_message);
-            }
-        }
+        session.push_message_to_stack(message);
+        drop(sessions);
 
         Ok(())
     }
@@ -87,33 +134,6 @@ impl Agent {
         sessions.get(session_id).cloned()
     }
 
-    /// Adds a message to a session
-    fn add_message_to_session(&self, session_id: &str, message: Message) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.add_message(message);
-            Ok(())
-        } else {
-            Err(format!("Session '{}' not found", session_id))
-        }
-    }
-
-    /// Adds a message with response to a session
-    fn add_message_with_response_to_session(
-        &self,
-        session_id: &str,
-        message: Message,
-        response: String,
-    ) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.add_message_with_response(message, response);
-            Ok(())
-        } else {
-            Err(format!("Session '{}' not found", session_id))
-        }
-    }
-
     /// Lists all session IDs
     pub fn list_sessions(&self) -> Vec<String> {
         let sessions = self.sessions.lock().unwrap();
@@ -128,15 +148,19 @@ impl Agent {
             .ok_or_else(|| format!("Session '{}' not found", session_id))
     }
 
-    /// Handles incoming messages - to be implemented later (private)
-    /// In this function the basic logic will be triggered. Meaning how the agents talk to each
-    /// other and if they talk to each other.
-    fn on_message(&self, message: &Message) {
-        // Placeholder implementation
-        println!(
-            "[{}] Received message from {}: {}",
-            self.name, message.from, message.content
-        );
+    /// Sets the join handle for a session's processing task
+    pub fn set_session_join_handle(
+        &self,
+        session_id: &str,
+        handle: tokio::task::JoinHandle<()>,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.set_join_handle(handle);
+            Ok(())
+        } else {
+            Err(format!("Session '{}' not found", session_id))
+        }
     }
 }
 

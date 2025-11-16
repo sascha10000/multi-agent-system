@@ -2,9 +2,34 @@
 
 A Rust-based multi-agent communication system that allows agents to connect and communicate with each other.
 
+## Prerequisites
+
+Before running the project, ensure you have:
+
+1. **Rust and Cargo** - Install from [rustup.rs](https://rustup.rs/)
+2. **Ollama** - Required for LLM-powered agent responses
+   - Install: `curl -fsSL https://ollama.com/install.sh | sh`
+   - Or visit: [https://ollama.com/download](https://ollama.com/download)
+3. **Ollama Model** - Pull the model used by agents:
+   ```bash
+   ollama pull gemma3:4b
+   ```
+
+### Starting Ollama
+
+Before running the application, start the Ollama service:
+
+```bash
+ollama serve
+```
+
+This will start Ollama on the default port `11434`. Keep this running in a separate terminal.
+
 ## Overview
 
 This project implements a backend system for managing multiple agents that can communicate with each other. Agents can only send messages to other agents they are connected to, ensuring controlled and secure communication channels.
+
+Agents use Ollama-powered LLMs to process messages and generate intelligent responses based on their assigned roles.
 
 ## Architecture
 
@@ -91,8 +116,13 @@ fn main() {
 
 ## Running the Project
 
+**Important:** Make sure Ollama is running before starting the application!
+
 ```bash
-# Build the project
+# Terminal 1: Start Ollama service
+ollama serve
+
+# Terminal 2: Build and run the project
 cd backend
 cargo build
 
