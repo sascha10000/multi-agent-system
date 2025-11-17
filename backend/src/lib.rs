@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_system;
 pub mod chat;
+pub mod errors;
 pub mod message;
 pub mod session;
 

@@ -17,7 +17,6 @@ struct OllamaRequest {
 #[derive(Debug, Deserialize)]
 struct OllamaResponse {
     response: String,
-    done: bool,
 }
 
 /// Ollama chat implementation

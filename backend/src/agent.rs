@@ -1,3 +1,4 @@
+use crate::errors::SessionError;
 use crate::message::Message;
 use crate::session::Session;
 use crate::{LLMChat, OllamaChat};
@@ -66,6 +67,9 @@ impl Agent {
                             // Store the message and response in the session
                             let mut sessions_guard = sessions.lock().unwrap();
                             if let Some(session) = sessions_guard.get_mut(&c_session_id) {
+                                // TODO: Restructure response, as there needs to be more info in
+                                // it. Because the LLM should determine which Agent should be
+                                // contacted next or what the next action is...
                                 session.add_message_with_response(message, response);
                             }
                         }
@@ -106,11 +110,11 @@ impl Agent {
     }
 
     /// Sends a message to this agent, managing the message stack for the given session
-    pub fn send_message(&self, session_id: &str, message: Message) -> Result<(), String> {
+    pub fn send_message(&self, session_id: &str, message: Message) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().unwrap();
         let session = sessions
             .get_mut(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
 
         session.push_message_to_stack(message);
         drop(sessions);
@@ -119,10 +123,10 @@ impl Agent {
     }
 
     /// Creates a new session for this agent
-    pub fn create_session(&self, session_id: String) -> Result<(), String> {
+    pub fn create_session(&self, session_id: String) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.contains_key(&session_id) {
-            return Err(format!("Session '{}' already exists", session_id));
+            return Err(SessionError::Exists(session_id.to_string()));
         }
         sessions.insert(session_id.clone(), Session::new(session_id));
         Ok(())
@@ -141,11 +145,11 @@ impl Agent {
     }
 
     /// Removes a session
-    pub fn remove_session(&self, session_id: &str) -> Result<Session, String> {
+    pub fn remove_session(&self, session_id: &str) -> Result<Session, SessionError> {
         let mut sessions = self.sessions.lock().unwrap();
         sessions
             .remove(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
     }
 
     /// Sets the join handle for a session's processing task
@@ -153,13 +157,13 @@ impl Agent {
         &self,
         session_id: &str,
         handle: tokio::task::JoinHandle<()>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(session_id) {
             session.set_join_handle(handle);
             Ok(())
         } else {
-            Err(format!("Session '{}' not found", session_id))
+            Err(SessionError::NotFound(session_id.to_string()))
         }
     }
 

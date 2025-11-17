@@ -1,7 +1,9 @@
-use crate::agent::Agent;
+use crate::errors::AgentError;
 use crate::message::Message;
+use crate::{agent::Agent, errors::SessionError};
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
 
 /// Multi-agent system manager
 pub struct AgentSystem {
@@ -21,18 +23,18 @@ impl AgentSystem {
     }
 
     /// Adds an agent to the system
-    pub fn add_agent(&mut self, agent: Agent) -> Result<(), String> {
+    pub fn add_agent(&mut self, agent: Agent) -> Result<(), AgentError> {
         if self.agents.contains_key(&agent.name) {
-            return Err(format!("Agent with name '{}' already exists", agent.name));
+            return Err(AgentError::Exists(agent.name));
         }
         self.agents.insert(agent.name.clone(), agent);
         Ok(())
     }
 
     /// Removes an agent from the system
-    pub fn remove_agent(&mut self, name: &str) -> Result<Agent, String> {
+    pub fn remove_agent(&mut self, name: &str) -> Result<Agent, AgentError> {
         if !self.agents.contains_key(name) {
-            return Err(format!("Agent '{}' not found", name));
+            return Err(AgentError::NotFound(name.to_string()));
         }
 
         // Remove all connections to this agent
@@ -40,7 +42,7 @@ impl AgentSystem {
 
         self.agents
             .remove(name)
-            .ok_or_else(|| format!("Agent '{}' not found", name))
+            .ok_or_else(|| AgentError::NotFound(name.to_string()))
     }
 
     /// Removes all connections to a specific agent
@@ -59,12 +61,16 @@ impl AgentSystem {
     }
 
     /// Connects two agents bidirectionally
-    pub fn connect_agents(&mut self, agent1_name: &str, agent2_name: &str) -> Result<(), String> {
+    pub fn connect_agents(
+        &mut self,
+        agent1_name: &str,
+        agent2_name: &str,
+    ) -> Result<(), AgentError> {
         if !self.agents.contains_key(agent1_name) {
-            return Err(format!("Agent '{}' not found", agent1_name));
+            return Err(AgentError::NotFound(agent1_name.to_string()));
         }
         if !self.agents.contains_key(agent2_name) {
-            return Err(format!("Agent '{}' not found", agent2_name));
+            return Err(AgentError::NotFound(agent2_name.to_string()));
         }
 
         if let Some(agent1) = self.agents.get(agent1_name) {
@@ -93,25 +99,33 @@ impl AgentSystem {
     }
 
     /// Sends a message from one agent to another (only if connected)
-    pub fn send_message(&self, from: &str, to: &str, content: String) -> Result<Message, String> {
+    pub fn send_message(
+        &self,
+        from: &str,
+        to: &str,
+        content: String,
+    ) -> Result<Message, Box<dyn Error>> {
         let sender = self
             .agents
             .get(from)
-            .ok_or_else(|| format!("Sender agent '{}' not found", from))?;
+            .ok_or_else(|| AgentError::NotFound(from.to_string()))?;
 
         let recipient = self
             .agents
             .get(to)
-            .ok_or_else(|| format!("Recipient agent '{}' not found", to))?;
+            .ok_or_else(|| AgentError::NotFound(to.to_string()))?;
 
         if !sender.is_connected_to(to) {
-            return Err(format!("Agent '{}' is not connected to '{}'", from, to));
+            return Err(Box::new(AgentError::NotConnected(
+                from.to_string(),
+                to.to_string(),
+            )));
         }
 
         // Get the recipient's active session
         let session_id = self
             .get_active_session()
-            .ok_or_else(|| format!("No active session for agent '{}'", to))?;
+            .ok_or_else(|| AgentError::NoActiveSession(to.to_string()))?;
 
         let message = Message::new(from.to_string(), to.to_string(), content);
 
@@ -183,10 +197,10 @@ impl AgentSystem {
     }
 
     /// Sets the active session for the entire system
-    pub fn set_active_session(&mut self, session_id: String) -> Result<(), String> {
+    pub fn set_active_session(&mut self, session_id: String) -> Result<(), SessionError> {
         // Verify that the session exists
         if !self.session_ids.contains(&session_id) {
-            return Err(format!("Session '{}' does not exist", session_id));
+            return Err(SessionError::NotFound(session_id.to_string()));
         }
 
         self.active_session = Some(session_id);
