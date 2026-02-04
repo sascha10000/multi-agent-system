@@ -13,6 +13,12 @@ pub struct AgentSystem {
 }
 
 impl AgentSystem {
+    // Constants for queue draining
+    const QUEUE_POLL_INTERVAL_MS: u64 = 50;
+    const MAX_QUEUE_POLL_INTERVAL_MS: u64 = 500;
+    const BACKOFF_MULTIPLIER: f32 = 1.5;
+    const SESSION_DRAIN_TIMEOUT_SECS: u64 = 30;
+
     /// Creates a new agent system
     pub fn new() -> Self {
         AgentSystem {
@@ -168,6 +174,25 @@ impl AgentSystem {
         self.agents.values().collect()
     }
 
+    /// Checks if all agents have empty message queues for the specified session
+    fn check_all_queues_empty(&self, session_id: &str) -> bool {
+        for agent in self.agents.values() {
+            if !agent.is_session_message_queue_empty(session_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Gets the total number of queued messages across all agents for a session
+    fn get_total_queued_messages(&self, session_id: &str) -> usize {
+        let mut total = 0;
+        for agent in self.agents.values() {
+            total += agent.get_session_message_count(session_id);
+        }
+        total
+    }
+
     /// Creates a session with the same ID for all agents
     /// Sets this as the active session for the entire system
     pub fn create_session(&mut self, session_id: String) -> Result<(), String> {
@@ -239,10 +264,58 @@ impl AgentSystem {
     }
 
     /// Waits for all session processing tasks to complete
-    /// Takes ownership of the JoinHandles, removes the session (signaling tasks to exit),
+    /// First drains all message queues, then removes the session (signaling tasks to exit),
     /// and awaits them concurrently
     pub async fn wait_for_session_tasks(&mut self, session_id: &str) -> Result<(), String> {
-        // Collect all join handles for this session BEFORE removing it
+        // Phase 1: Wait for all message queues to drain
+        println!(
+            "Phase 1: Draining message queues for session '{}'...",
+            session_id
+        );
+
+        let drain_start = tokio::time::Instant::now();
+        let drain_timeout = tokio::time::Duration::from_secs(Self::SESSION_DRAIN_TIMEOUT_SECS);
+        let mut poll_interval_ms = Self::QUEUE_POLL_INTERVAL_MS;
+
+        loop {
+            let total_messages = self.get_total_queued_messages(session_id);
+
+            if self.check_all_queues_empty(session_id) {
+                println!("All message queues empty for session '{}'", session_id);
+                break;
+            }
+
+            // Check timeout
+            if drain_start.elapsed() > drain_timeout {
+                eprintln!(
+                    "Warning: Timeout waiting for queues to drain. {} messages remaining.",
+                    total_messages
+                );
+                break;
+            }
+
+            // Log progress if there are messages
+            if total_messages > 0 {
+                println!(
+                    "Waiting for {} messages to be processed (elapsed: {:.1}s)...",
+                    total_messages,
+                    drain_start.elapsed().as_secs_f32()
+                );
+            }
+
+            // Sleep with exponential backoff
+            tokio::time::sleep(tokio::time::Duration::from_millis(poll_interval_ms)).await;
+
+            // Increase poll interval with exponential backoff (capped at max)
+            poll_interval_ms = (poll_interval_ms as f32 * Self::BACKOFF_MULTIPLIER) as u64;
+            poll_interval_ms = poll_interval_ms.min(Self::MAX_QUEUE_POLL_INTERVAL_MS);
+        }
+
+        // Phase 2: Collect join handles
+        println!(
+            "Phase 2: Collecting task handles for session '{}'...",
+            session_id
+        );
         let mut handles = Vec::new();
         for agent in self.agents.values() {
             if let Some(handle) = agent.take_session_join_handle(session_id) {
@@ -257,11 +330,8 @@ impl AgentSystem {
             ));
         }
 
-        println!("Waiting for {} processing tasks...", handles.len());
-
-        // Remove the session to signal tasks to exit
-        // TODO: The problem here is that the threads get basically killed eventhough it may be
-        // possible that there is still some message in the queue. This should just happen on exit.
+        // Phase 3: Remove session to signal tasks to exit, then wait
+        println!("Phase 3: Signaling tasks to exit and waiting for completion...");
         self.remove_session(session_id)?;
 
         // Wait for all handles
@@ -279,7 +349,7 @@ impl AgentSystem {
         if had_errors {
             Err("Some tasks panicked".to_string())
         } else {
-            println!("All tasks completed successfully");
+            println!("Session '{}' processing complete!", session_id);
             Ok(())
         }
     }

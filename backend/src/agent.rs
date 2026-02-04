@@ -144,6 +144,26 @@ impl Agent {
         sessions.keys().cloned().collect()
     }
 
+    /// Checks if the message queue is empty for a specific session
+    pub fn is_session_message_queue_empty(&self, session_id: &str) -> bool {
+        let sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get(session_id) {
+            session.is_message_stack_empty()
+        } else {
+            true // If session doesn't exist, treat as empty
+        }
+    }
+
+    /// Gets the number of messages in the queue for a specific session
+    pub fn get_session_message_count(&self, session_id: &str) -> usize {
+        let sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get(session_id) {
+            session.message_stack_size()
+        } else {
+            0 // If session doesn't exist, return 0
+        }
+    }
+
     /// Removes a session
     pub fn remove_session(&self, session_id: &str) -> Result<Session, SessionError> {
         let mut sessions = self.sessions.lock().unwrap();
