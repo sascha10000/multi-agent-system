@@ -19,7 +19,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::models::{
     AgentInfo, ConnectionInfo, DeleteSystemResponse, ListSystemsResponse, PromptResult,
     RegisterSystemRequest, RegisterSystemResponse, SendPromptRequest, SendPromptResponse,
-    SystemDetailResponse, SystemSummary,
+    SystemDetailResponse, SystemSummary, UpdateSystemRequest, UpdateSystemResponse,
 };
 use crate::state::{AgentMetadata, AppState, ConfigMetadata, ConnectionMetadata, SystemEntry};
 
@@ -192,6 +192,70 @@ pub async fn delete_system(
     Ok(Json(DeleteSystemResponse {
         name: name.clone(),
         message: format!("System '{}' deleted successfully", name),
+    }))
+}
+
+/// PUT /api/v1/systems/{name} - Update an existing system
+///
+/// Uses a replace strategy: removes the old system and creates a new one with the updated config.
+pub async fn update_system(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<UpdateSystemRequest>,
+) -> ApiResult<Json<UpdateSystemResponse>> {
+    info!("Updating system: {}", name);
+
+    // Check if system exists
+    if !state.system_exists(&name).await {
+        return Err(ApiError::SystemNotFound(name));
+    }
+
+    // Validate the new configuration
+    validate_config(&request.config).map_err(|e| ApiError::ConfigError(e.to_string()))?;
+
+    // Extract metadata before we move the config
+    let metadata = extract_metadata(&request.config);
+
+    // Write config to a temporary file for load_system_from_json
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("mas-api-{}.json", Uuid::new_v4()));
+
+    let config_json = serde_json::to_string_pretty(&request.config)
+        .map_err(|e| ApiError::Internal(format!("Failed to serialize config: {}", e)))?;
+
+    std::fs::write(&temp_file, &config_json)
+        .map_err(|e| ApiError::Internal(format!("Failed to write temp config: {}", e)))?;
+
+    // Load the new system
+    let system = load_system_from_json(&temp_file)
+        .await
+        .map_err(|e| ApiError::ConfigError(e.to_string()))?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_file);
+
+    // Remove the old system
+    state.remove_system(&name).await;
+
+    // Create the new entry and register
+    let entry = SystemEntry::new(system, metadata.clone());
+    let updated_at = entry.created_at;
+
+    state
+        .register_system(name.clone(), entry)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to re-register system: {}", e)))?;
+
+    info!(
+        "System '{}' updated with {} agents",
+        name, metadata.agent_count
+    );
+
+    Ok(Json(UpdateSystemResponse {
+        name,
+        message: "System updated successfully".to_string(),
+        agent_count: metadata.agent_count,
+        updated_at,
     }))
 }
 

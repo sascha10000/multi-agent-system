@@ -113,3 +113,19 @@ pub struct DeleteSystemResponse {
     pub name: String,
     pub message: String,
 }
+
+/// Request body for updating an existing system
+#[derive(Debug, Deserialize)]
+pub struct UpdateSystemRequest {
+    /// The updated JSON configuration for the multi-agent system
+    pub config: SystemConfigJson,
+}
+
+/// Response after successfully updating a system
+#[derive(Debug, Serialize)]
+pub struct UpdateSystemResponse {
+    pub name: String,
+    pub message: String,
+    pub agent_count: usize,
+    pub updated_at: DateTime<Utc>,
+}

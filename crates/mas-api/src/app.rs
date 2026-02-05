@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::{
@@ -43,6 +43,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/systems", post(handlers::create_system))
         .route("/systems", get(handlers::list_systems))
         .route("/systems/:name", get(handlers::get_system))
+        .route("/systems/:name", put(handlers::update_system))
         .route("/systems/:name", delete(handlers::delete_system))
         // Prompt handling
         .route("/systems/:name/prompt", post(handlers::send_prompt));

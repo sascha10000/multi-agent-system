@@ -50,6 +50,17 @@ export interface DeleteSystemResponse {
   message: string;
 }
 
+export interface UpdateSystemRequest {
+  config: SystemConfigJson;
+}
+
+export interface UpdateSystemResponse {
+  name: string;
+  message: string;
+  agent_count: number;
+  updated_at: string;
+}
+
 export interface SendPromptRequest {
   content: string;
   target_agent?: string;

@@ -4,9 +4,11 @@ import type {
   RegisterSystemRequest,
   RegisterSystemResponse,
   DeleteSystemResponse,
+  UpdateSystemResponse,
   SendPromptRequest,
   SendPromptResponse,
   ApiError,
+  SystemConfigJson,
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -55,6 +57,13 @@ class ApiClient {
   async deleteSystem(name: string): Promise<DeleteSystemResponse> {
     return this.request<DeleteSystemResponse>(`/systems/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+    });
+  }
+
+  async updateSystem(name: string, config: SystemConfigJson): Promise<UpdateSystemResponse> {
+    return this.request<UpdateSystemResponse>(`/systems/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
     });
   }
 
