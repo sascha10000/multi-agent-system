@@ -7,6 +7,7 @@ import type {
   SessionPromptResponse,
   CreateSessionResponse,
   PromptResult,
+  AgentTraceStep,
 } from '../types/api';
 
 interface ChatMessage {
@@ -15,6 +16,7 @@ interface ChatMessage {
   content: string;
   agent?: string;
   timestamp: Date;
+  trace?: AgentTraceStep[];
 }
 
 interface ChatPanelProps {
@@ -33,6 +35,8 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'registering' | 'creating_session' | 'ready' | 'error'>('idle');
+  const [verboseMode, setVerboseMode] = useState(false);
+  const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -192,6 +196,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         content: assistantContent,
         agent: agentName,
         timestamp: new Date(),
+        trace: data.trace && data.trace.length > 0 ? data.trace : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -222,6 +227,49 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     setMessages([]);
     setStatus('idle');
     setError(null);
+    setExpandedTraces(new Set());
+  };
+
+  const toggleTraceExpanded = (messageId: string) => {
+    setExpandedTraces((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  };
+
+  const getStepTypeColor = (stepType: string) => {
+    switch (stepType) {
+      case 'request':
+        return 'text-blue-400 bg-blue-900/30';
+      case 'response':
+        return 'text-green-400 bg-green-900/30';
+      case 'forward':
+        return 'text-amber-400 bg-amber-900/30';
+      case 'synthesis':
+        return 'text-purple-400 bg-purple-900/30';
+      default:
+        return 'text-zinc-400 bg-zinc-700';
+    }
+  };
+
+  const getStepTypeIcon = (stepType: string) => {
+    switch (stepType) {
+      case 'request':
+        return '→';
+      case 'response':
+        return '←';
+      case 'forward':
+        return '↗';
+      case 'synthesis':
+        return '⊕';
+      default:
+        return '•';
+    }
   };
 
   if (!isOpen) return null;
@@ -238,6 +286,19 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setVerboseMode(!verboseMode)}
+            className={`p-1.5 rounded transition-colors ${
+              verboseMode
+                ? 'text-amber-400 bg-amber-900/30 hover:bg-amber-900/50'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
+            }`}
+            title={verboseMode ? 'Hide agent trace' : 'Show agent trace'}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </button>
           <button
             onClick={resetSession}
             className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
@@ -310,28 +371,74 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         )}
 
         {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
+          <div key={msg.id} className="space-y-2">
             <div
-              className={`max-w-[85%] rounded-lg px-3 py-2 ${
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : msg.role === 'system'
-                  ? 'bg-zinc-700 text-zinc-300 text-sm italic'
-                  : 'bg-zinc-800 text-zinc-100 border border-zinc-700'
-              }`}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              {msg.agent && (
-                <div className="text-xs text-zinc-400 mb-1 font-medium">
-                  {msg.agent}
+              <div
+                className={`max-w-[85%] rounded-lg px-3 py-2 ${
+                  msg.role === 'user'
+                    ? 'bg-blue-600 text-white'
+                    : msg.role === 'system'
+                    ? 'bg-zinc-700 text-zinc-300 text-sm italic'
+                    : 'bg-zinc-800 text-zinc-100 border border-zinc-700'
+                }`}
+              >
+                {msg.agent && (
+                  <div className="text-xs text-zinc-400 mb-1 font-medium">
+                    {msg.agent}
+                  </div>
+                )}
+                <div className="chat-markdown">
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
                 </div>
-              )}
-              <div className="chat-markdown">
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
               </div>
             </div>
+
+            {/* Agent Trace Display */}
+            {verboseMode && msg.trace && msg.trace.length > 0 && (
+              <div className="ml-4">
+                <button
+                  onClick={() => toggleTraceExpanded(msg.id)}
+                  className="flex items-center gap-2 text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                >
+                  <svg
+                    className={`w-3 h-3 transition-transform ${expandedTraces.has(msg.id) ? 'rotate-90' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span>{msg.trace.length} agent communication{msg.trace.length !== 1 ? 's' : ''}</span>
+                </button>
+
+                {expandedTraces.has(msg.id) && (
+                  <div className="mt-2 space-y-1 border-l-2 border-amber-900/50 pl-3">
+                    {msg.trace.map((step, idx) => (
+                      <div
+                        key={idx}
+                        className="text-xs bg-zinc-800/50 rounded p-2 border border-zinc-700/50"
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getStepTypeColor(step.step_type)}`}>
+                            {getStepTypeIcon(step.step_type)} {step.step_type}
+                          </span>
+                          <span className="text-zinc-400">
+                            <span className="text-zinc-300 font-medium">{step.from}</span>
+                            {' → '}
+                            <span className="text-zinc-300 font-medium">{step.to}</span>
+                          </span>
+                        </div>
+                        <div className="text-zinc-400 mt-1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+                          {step.content.length > 300 ? `${step.content.slice(0, 300)}...` : step.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ))}
 

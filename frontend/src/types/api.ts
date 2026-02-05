@@ -47,6 +47,13 @@ export interface PromptResultNotified {
 
 export type PromptResult = PromptResultResponse | PromptResultTimeout | PromptResultNotified;
 
+export interface AgentTraceStep {
+  from: string;
+  to: string;
+  content: string;
+  step_type: 'request' | 'response' | 'forward' | 'synthesis';
+}
+
 export interface SessionPromptResponse {
   message_id: string;
   session_id: string;
@@ -54,6 +61,7 @@ export interface SessionPromptResponse {
   result: PromptResult;
   elapsed_ms: number;
   context?: MessageResponse[];
+  trace?: AgentTraceStep[];
 }
 
 export interface MessageResponse {

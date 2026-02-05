@@ -44,7 +44,9 @@ export interface SystemConfigJson {
 }
 
 // React Flow specific types
+// Index signature needed for React Flow's Record<string, unknown> constraint
 export interface AgentNodeData {
+  [key: string]: unknown;
   name: string;
   role: string;
   systemPrompt: string;
