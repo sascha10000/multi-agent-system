@@ -37,6 +37,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const [status, setStatus] = useState<'idle' | 'registering' | 'creating_session' | 'ready' | 'error'>('idle');
   const [verboseMode, setVerboseMode] = useState(false);
   const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
+  const [selectedTraceStep, setSelectedTraceStep] = useState<AgentTraceStep | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -416,9 +417,10 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
                 {expandedTraces.has(msg.id) && (
                   <div className="mt-2 space-y-1 border-l-2 border-amber-900/50 pl-3">
                     {msg.trace.map((step, idx) => (
-                      <div
+                      <button
                         key={idx}
-                        className="text-xs bg-zinc-800/50 rounded p-2 border border-zinc-700/50"
+                        onClick={() => setSelectedTraceStep(step)}
+                        className="w-full text-left text-xs bg-zinc-800/50 rounded p-2 border border-zinc-700/50 hover:bg-zinc-700/50 hover:border-zinc-600 transition-colors cursor-pointer"
                       >
                         <div className="flex items-center gap-2 mb-1">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getStepTypeColor(step.step_type)}`}>
@@ -429,11 +431,12 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
                             {' → '}
                             <span className="text-zinc-300 font-medium">{step.to}</span>
                           </span>
+                          <span className="ml-auto text-zinc-500 text-[10px]">Click to expand</span>
                         </div>
-                        <div className="text-zinc-400 mt-1 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
-                          {step.content.length > 300 ? `${step.content.slice(0, 300)}...` : step.content}
+                        <div className="text-zinc-400 mt-1 whitespace-pre-wrap break-words max-h-20 overflow-hidden">
+                          {step.content.length > 150 ? `${step.content.slice(0, 150)}...` : step.content}
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -481,6 +484,66 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </button>
         </div>
       </div>
+
+      {/* Trace Step Modal */}
+      {selectedTraceStep && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4"
+          onClick={() => setSelectedTraceStep(null)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700 bg-zinc-800 rounded-t-lg">
+              <div className="flex items-center gap-3">
+                <span className={`px-2 py-1 rounded text-xs font-medium ${getStepTypeColor(selectedTraceStep.step_type)}`}>
+                  {getStepTypeIcon(selectedTraceStep.step_type)} {selectedTraceStep.step_type}
+                </span>
+                <span className="text-zinc-300">
+                  <span className="font-medium">{selectedTraceStep.from}</span>
+                  <span className="text-zinc-500 mx-2">→</span>
+                  <span className="font-medium">{selectedTraceStep.to}</span>
+                </span>
+              </div>
+              <button
+                onClick={() => setSelectedTraceStep(null)}
+                className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="chat-markdown bg-zinc-800/50 rounded-lg p-4 border border-zinc-700">
+                <ReactMarkdown>{selectedTraceStep.content}</ReactMarkdown>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-4 py-3 border-t border-zinc-700 bg-zinc-800/50 rounded-b-lg flex justify-between items-center">
+              <span className="text-xs text-zinc-500">
+                {selectedTraceStep.content.length} characters
+              </span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(selectedTraceStep.content);
+                }}
+                className="px-3 py-1.5 text-xs font-medium text-zinc-300 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
