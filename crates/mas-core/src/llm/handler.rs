@@ -110,11 +110,10 @@ impl LlmHandler {
     /// Build the routing instructions to append to the system prompt
     fn build_routing_instructions(&self, agent: &Agent) -> String {
         // Collect blocking connections (these are the ones LLM can forward to)
-        let blocking_connections: Vec<&String> = agent
+        let blocking_connections: Vec<(&String, &crate::connection::Connection)> = agent
             .connections
             .iter()
             .filter(|(_, conn)| conn.connection_type == ConnectionType::Blocking)
-            .map(|(name, _)| name)
             .collect();
 
         if blocking_connections.is_empty() {
@@ -128,10 +127,14 @@ Do not include any text outside the JSON object."#
                 .to_string();
         }
 
-        // Build agent list
+        // Build agent list with roles for better routing decisions
         let mut agent_list = String::new();
-        for name in &blocking_connections {
-            agent_list.push_str(&format!("- {}\n", name));
+        for (name, conn) in &blocking_connections {
+            if let Some(ref role) = conn.target_role {
+                agent_list.push_str(&format!("- {} ({})\n", name, role));
+            } else {
+                agent_list.push_str(&format!("- {}\n", name));
+            }
         }
 
         // Build behavior-specific instructions
@@ -140,7 +143,7 @@ Do not include any text outside the JSON object."#
                 // Build the list of all agents for the forward_to example
                 let all_agents_example: String = blocking_connections
                     .iter()
-                    .map(|name| format!("{{ \"agent\": \"{}\", \"message\": \"<relevant question for this agent>\" }}", name))
+                    .map(|(name, _)| format!("{{ \"agent\": \"{}\", \"message\": \"<relevant question for this agent>\" }}", name))
                     .collect::<Vec<_>>()
                     .join(", ");
 
@@ -185,26 +188,29 @@ Prefer answering directly. Only include valid JSON in your response."#,
                     r#"
 You can either:
 1. Respond directly to the sender
-2. Forward the request to one or more of your connected agents
+2. Forward the request to the BEST matching agent based on their expertise
 3. Both respond AND forward (acknowledge + delegate)
 
-Available agents you can forward to:
+Available agents you can forward to (with their expertise):
 {}
+IMPORTANT: Choose the agent whose expertise BEST MATCHES the question topic.
+Look at each agent's role description in parentheses to decide who should handle the request.
+
 Respond with JSON in one of these formats:
 
-Direct response:
+Direct response (only if no agent matches the topic):
 {{ "response": "your response here" }}
 
-Forward to agent(s):
-{{ "forward_to": [{{ "agent": "AgentName", "message": "what to ask them" }}] }}
+Forward to the best agent:
+{{ "forward_to": [{{ "agent": "AgentName", "message": "the question to ask" }}] }}
 
 Both respond and forward:
 {{
-  "response": "I'll look into that for you.",
-  "forward_to": [{{ "agent": "AgentName", "message": "what to ask them" }}]
+  "response": "I'll check with our specialist.",
+  "forward_to": [{{ "agent": "AgentName", "message": "the question to ask" }}]
 }}
 
-Choose the most appropriate action based on the request. Forward when another agent would be better suited to handle the task. Only include valid JSON in your response."#,
+Only include valid JSON in your response."#,
                     agent_list
                 )
             }

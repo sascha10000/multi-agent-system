@@ -9,6 +9,7 @@ pub mod errors;
 pub mod llm;
 pub mod message;
 pub mod session_memory;
+pub mod tracer;
 
 // Re-export commonly used types
 pub use agent::{Agent, AgentBuilder};
@@ -24,3 +25,4 @@ pub use session_memory::{
     delete_session, list_sessions, ContextHit, SessionMemory, SessionMemoryConfig,
     SessionMemoryError, StoredMessage,
 };
+pub use tracer::{TraceCollector, TraceEvent, TraceEventType};

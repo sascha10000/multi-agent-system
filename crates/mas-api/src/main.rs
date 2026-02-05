@@ -5,74 +5,67 @@
 
 use std::net::SocketAddr;
 
+use clap::Parser;
 use mas_api::{create_router, AppState};
 use tracing::{info, Level};
 
-/// Parse command line arguments for server configuration
-fn parse_args() -> (String, u16) {
-    let args: Vec<String> = std::env::args().collect();
+/// Multi-Agent System REST API Server
+///
+/// Provides HTTP endpoints for registering, managing, and interacting
+/// with multi-agent systems.
+#[derive(Parser, Debug)]
+#[command(name = "mas-api")]
+#[command(author, version, about, long_about = None)]
+#[command(after_help = r#"API ENDPOINTS:
 
-    let host = get_arg_value(&args, "--host").unwrap_or_else(|| "0.0.0.0".to_string());
-    let port = get_arg_value(&args, "--port")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
+  Systems:
+    POST   /api/v1/systems                Register a new system
+    GET    /api/v1/systems                List all systems
+    GET    /api/v1/systems/{name}         Get system details
+    PUT    /api/v1/systems/{name}         Update a system
+    DELETE /api/v1/systems/{name}         Remove a system
+    POST   /api/v1/systems/{name}/prompt  Send a prompt (no session)
 
-    (host, port)
-}
+  Sessions:
+    POST   /api/v1/sessions               Create a new session
+    GET    /api/v1/sessions               List all sessions
+    GET    /api/v1/sessions/{id}          Get session details
+    DELETE /api/v1/sessions/{id}          Delete a session
+    GET    /api/v1/sessions/{id}/history  Get conversation history
+    GET    /api/v1/sessions/{id}/search   Semantic search in session
+    POST   /api/v1/sessions/{id}/prompt   Send a prompt (with memory)
+    POST   /api/v1/sessions/{id}/build-index  Build search index
 
-fn get_arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-}
+EXAMPLES:
+    mas-api                     Start server on 0.0.0.0:8080
+    mas-api --port 3000         Start server on port 3000
+    mas-api --host 127.0.0.1    Bind to localhost only
+"#)]
+struct Args {
+    /// Host address to bind to
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
 
-fn print_usage() {
-    println!("Multi-Agent System REST API Server");
-    println!();
-    println!("Usage: mas-api [OPTIONS]");
-    println!();
-    println!("Options:");
-    println!("  --host <HOST>  Host to bind to (default: 0.0.0.0)");
-    println!("  --port <PORT>  Port to listen on (default: 3000)");
-    println!("  --help         Show this help message");
-    println!();
-    println!("API Endpoints - Systems:");
-    println!("  POST   /api/v1/systems                Register a new system");
-    println!("  GET    /api/v1/systems                List all systems");
-    println!("  GET    /api/v1/systems/{{name}}         Get system details");
-    println!("  PUT    /api/v1/systems/{{name}}         Update a system");
-    println!("  DELETE /api/v1/systems/{{name}}         Remove a system");
-    println!("  POST   /api/v1/systems/{{name}}/prompt  Send a prompt (no session)");
-    println!();
-    println!("API Endpoints - Sessions:");
-    println!("  POST   /api/v1/sessions                      Create a new session");
-    println!("  GET    /api/v1/sessions                      List all sessions");
-    println!("  GET    /api/v1/sessions/{{id}}                 Get session details");
-    println!("  DELETE /api/v1/sessions/{{id}}                 Delete a session");
-    println!("  GET    /api/v1/sessions/{{id}}/history         Get conversation history");
-    println!("  GET    /api/v1/sessions/{{id}}/search?q=...    Semantic search in session");
-    println!("  POST   /api/v1/sessions/{{id}}/prompt          Send a prompt (with memory)");
-    println!("  POST   /api/v1/sessions/{{id}}/build-index     Build search index");
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
+
+    /// Enable debug logging
+    #[arg(short, long)]
+    debug: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-
-    // Check for --help flag
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_usage();
-        return Ok(());
-    }
+    let args = Args::parse();
 
     // Initialize tracing
+    let log_level = if args.debug { Level::DEBUG } else { Level::INFO };
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
+        .with_max_level(log_level)
         .init();
 
-    let (host, port) = parse_args();
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
 
     // Create application state
     let state = AppState::new();

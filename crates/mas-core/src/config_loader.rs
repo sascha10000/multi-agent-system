@@ -346,9 +346,16 @@ pub async fn load_system_from_json(json_path: &Path) -> Result<Arc<AgentSystem>>
     // Create the agent system (wrapped in Arc for routing agents)
     let system = Arc::new(AgentSystem::new(system_config));
 
+    // Collect agent roles for routing decisions (so routing agents know what each agent does)
+    let agent_roles: HashMap<String, String> = config
+        .agents
+        .iter()
+        .map(|a| (a.name.clone(), a.role.clone()))
+        .collect();
+
     // Register all agents
     for agent_config in &config.agents {
-        register_agent_from_config(system.clone(), agent_config, &providers).await?;
+        register_agent_from_config(system.clone(), agent_config, &providers, &agent_roles).await?;
     }
 
     info!("Agent system loaded successfully");
@@ -370,20 +377,28 @@ async fn register_agent_from_config(
     system: Arc<AgentSystem>,
     config: &AgentConfig,
     providers: &HashMap<String, Arc<dyn LlmProvider>>,
+    agent_roles: &HashMap<String, String>,
 ) -> Result<()> {
     // Build the agent
     let mut builder = AgentBuilder::new(&config.name)
         .role(&config.role)
         .system_prompt(&config.system_prompt);
 
-    // Add connections
+    // Add connections (with target agent's role for routing decisions)
     for (target, conn_config) in &config.connections {
+        let target_role = agent_roles.get(target).cloned();
         let connection = match conn_config.connection_type.to_lowercase().as_str() {
             "blocking" => {
                 let timeout = conn_config.timeout_secs.map(Duration::from_secs);
-                Connection::blocking(timeout)
+                let mut conn = Connection::blocking(timeout);
+                conn.target_role = target_role;
+                conn
             }
-            "notify" => Connection::notify(),
+            "notify" => {
+                let mut conn = Connection::notify();
+                conn.target_role = target_role;
+                conn
+            }
             _ => unreachable!(), // Already validated
         };
         builder = builder.connection(target, connection);
@@ -426,14 +441,24 @@ async fn register_agent_from_config(
         handler = handler.with_options(options);
     }
 
+    // Check if agent has blocking connections (candidates for routing)
+    let has_blocking_connections = config
+        .connections
+        .values()
+        .any(|c| c.connection_type.to_lowercase() == "blocking");
+
+    // Auto-enable routing if agent has blocking connections (unless explicitly disabled)
+    // This makes the UX more intuitive: if you connect agents, routing works automatically
+    let should_route = config.handler.routing || has_blocking_connections;
+
     // Register based on routing mode
-    if config.handler.routing {
+    if should_route {
         handler = handler
             .with_routing()
             .with_routing_behavior(config.handler.routing_behavior);
         debug!(
-            "Registering '{}' as routing agent with behavior {:?}",
-            config.name, config.handler.routing_behavior
+            "Registering '{}' as routing agent with behavior {:?} (auto={}, explicit={})",
+            config.name, config.handler.routing_behavior, has_blocking_connections, config.handler.routing
         );
         AgentSystem::register_routing_agent(system, agent, Arc::new(handler)).await?;
     } else {

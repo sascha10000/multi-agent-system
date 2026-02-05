@@ -10,7 +10,7 @@ use axum::{
 };
 use mas_core::{
     agent_system::EchoHandler, config_loader::SystemConfigJson, load_system_from_json,
-    validate_config, AgentBuilder, SendResult, StoredMessage,
+    validate_config, AgentBuilder, SendResult, StoredMessage, TraceCollector, TraceEventType,
 };
 use serde::Deserialize;
 use tracing::{error, info};
@@ -18,12 +18,12 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    AgentInfo, ConnectionInfo, CreateSessionRequest, CreateSessionResponse, DeleteSessionResponse,
-    DeleteSystemResponse, ListSessionsResponse, ListSystemsResponse, MessageResponse, PromptResult,
-    RegisterSystemRequest, RegisterSystemResponse, SearchHit, SendPromptRequest, SendPromptResponse,
-    SessionDetailResponse, SessionHistoryResponse, SessionPromptRequest, SessionPromptResponse,
-    SessionSearchRequest, SessionSearchResponse, SessionSummary, SystemDetailResponse, SystemSummary,
-    UpdateSystemRequest, UpdateSystemResponse,
+    AgentInfo, AgentTraceStep, ConnectionInfo, CreateSessionRequest, CreateSessionResponse,
+    DeleteSessionResponse, DeleteSystemResponse, ListSessionsResponse, ListSystemsResponse,
+    MessageResponse, PromptResult, RegisterSystemRequest, RegisterSystemResponse, SearchHit,
+    SendPromptRequest, SendPromptResponse, SessionDetailResponse, SessionHistoryResponse,
+    SessionPromptRequest, SessionPromptResponse, SessionSearchRequest, SessionSearchResponse,
+    SessionSummary, SystemDetailResponse, SystemSummary, UpdateSystemRequest, UpdateSystemResponse,
 };
 use crate::session::SessionError;
 use crate::state::{AgentMetadata, AppState, ConfigMetadata, ConnectionMetadata, SystemEntry};
@@ -603,15 +603,24 @@ pub async fn send_session_prompt(
         }
     };
 
-    // Optionally get context from past messages
+    // Get recent conversation history for context
     let mut context_messages = Vec::new();
+    let mut history_context = String::new();
+
     if request.include_context && request.context_limit > 0 {
         let manager = state.session_manager().read().await;
-        if let Ok(hits) = manager.search_session(&session_id, &request.content, request.context_limit).await {
-            context_messages = hits
-                .into_iter()
-                .map(|h| stored_to_response(&h.message))
-                .collect();
+        // Get recent messages (chronological order) instead of semantic search
+        if let Ok(history) = manager.get_history(&session_id, Some(request.context_limit)) {
+            // Build context string from conversation history
+            if !history.is_empty() {
+                history_context.push_str("<conversation_history>\n");
+                for msg in &history {
+                    let role = if msg.from == "user" { "User" } else { &msg.from };
+                    history_context.push_str(&format!("{}: {}\n", role, msg.content));
+                }
+                history_context.push_str("</conversation_history>\n\n");
+            }
+            context_messages = history.into_iter().map(|m| stored_to_response(&m)).collect();
         }
     }
 
@@ -624,6 +633,13 @@ pub async fn send_session_prompt(
             .map_err(session_to_api_error)?;
     }
 
+    // Build the full message with context
+    let full_message = if history_context.is_empty() {
+        request.content.clone()
+    } else {
+        format!("{}Current message: {}", history_context, request.content)
+    };
+
     info!(
         "Sending prompt to session '{}' system '{}' agent '{}': {}",
         session_id,
@@ -631,6 +647,9 @@ pub async fn send_session_prompt(
         target_agent,
         &request.content[..request.content.len().min(50)]
     );
+
+    // Create a trace collector to capture agent communications
+    let trace_collector = TraceCollector::new();
 
     // Create a temporary "User" agent to send the message
     let user_name = format!("_ApiUser_{}", Uuid::new_v4());
@@ -644,10 +663,10 @@ pub async fn send_session_prompt(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create user agent: {}", e)))?;
 
-    // Send the message
+    // Send the message with conversation history context and tracing enabled
     let message_id = Uuid::new_v4();
     let result = system
-        .send_message(&user_name, &target_agent, &request.content)
+        .send_message_with_trace(&user_name, &target_agent, &full_message, trace_collector.clone())
         .await
         .map_err(|e| {
             error!("Error sending message: {}", e);
@@ -655,6 +674,33 @@ pub async fn send_session_prompt(
         })?;
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    // Build trace of agent communications from the collector
+    let mut trace = Vec::new();
+
+    // Record the initial user request
+    trace.push(AgentTraceStep {
+        from: "User".to_string(),
+        to: target_agent.clone(),
+        content: request.content.clone(),
+        step_type: "request".to_string(),
+    });
+
+    // Add the recorded trace events (forwards, responses, synthesis)
+    let trace_events = trace_collector.events().await;
+    for event in trace_events {
+        trace.push(AgentTraceStep {
+            from: event.from,
+            to: event.to,
+            content: event.content,
+            step_type: match event.event_type {
+                TraceEventType::Request => "request".to_string(),
+                TraceEventType::Response => "response".to_string(),
+                TraceEventType::Forward => "forward".to_string(),
+                TraceEventType::Synthesis => "synthesis".to_string(),
+            },
+        });
+    }
 
     // Convert result to API response and store the response
     let prompt_result = match &result {
@@ -667,14 +713,30 @@ pub async fn send_session_prompt(
                 .await
                 .map_err(session_to_api_error)?;
 
+            // Record the final response to user in trace
+            trace.push(AgentTraceStep {
+                from: msg.from.clone(),
+                to: "User".to_string(),
+                content: msg.content.clone(),
+                step_type: "response".to_string(),
+            });
+
             PromptResult::Response {
                 content: msg.content.clone(),
                 from: msg.from.clone(),
             }
         }
-        SendResult::Timeout(err) => PromptResult::Timeout {
-            message: err.to_string(),
-        },
+        SendResult::Timeout(err) => {
+            trace.push(AgentTraceStep {
+                from: target_agent.clone(),
+                to: "User".to_string(),
+                content: format!("Timeout: {}", err),
+                step_type: "response".to_string(),
+            });
+            PromptResult::Timeout {
+                message: err.to_string(),
+            }
+        }
         SendResult::Notified => PromptResult::Notified,
     };
 
@@ -685,6 +747,7 @@ pub async fn send_session_prompt(
         result: prompt_result,
         elapsed_ms,
         context: context_messages,
+        trace,
     }))
 }
 

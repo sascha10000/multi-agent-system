@@ -2589,6 +2589,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "clap",
  "mas-core",
  "serde",
  "serde_json",

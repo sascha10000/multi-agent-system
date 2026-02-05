@@ -157,23 +157,75 @@ impl From<LlmDecisionJson> for HandlerDecision {
     }
 }
 
-/// Try to extract JSON from LLM response that may contain extra text
+/// Try to extract and merge JSON from LLM response that may contain extra text
 ///
-/// LLMs sometimes wrap JSON in markdown code blocks or add explanatory text.
-/// This function attempts to extract the JSON object.
-pub fn extract_json_from_response(response: &str) -> Option<&str> {
+/// LLMs sometimes wrap JSON in markdown code blocks, add explanatory text,
+/// or output multiple JSON objects. This function attempts to extract and
+/// merge all JSON objects into one.
+pub fn extract_json_from_response(response: &str) -> Option<String> {
     let response = response.trim();
 
-    // Try to find JSON object boundaries
-    if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
-            if end > start {
-                return Some(&response[start..=end]);
+    // Try to find all JSON objects in the response
+    let mut json_objects: Vec<LlmDecisionJson> = Vec::new();
+    let mut search_start = 0;
+
+    while let Some(start) = response[search_start..].find('{') {
+        let start = search_start + start;
+        // Find the matching closing brace by counting braces
+        let mut depth = 0;
+        let mut end = None;
+
+        for (i, c) in response[start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(end_pos) = end {
+            let json_str = &response[start..=end_pos];
+            if let Ok(parsed) = serde_json::from_str::<LlmDecisionJson>(json_str) {
+                json_objects.push(parsed);
+            }
+            search_start = end_pos + 1;
+        } else {
+            break;
+        }
+    }
+
+    // If we found multiple JSON objects, merge them
+    if json_objects.is_empty() {
+        return None;
+    }
+
+    if json_objects.len() == 1 {
+        // Single object - just return it as JSON string
+        return serde_json::to_string(&json_objects.remove(0)).ok();
+    }
+
+    // Merge multiple objects
+    let mut merged = LlmDecisionJson::default();
+    for obj in json_objects {
+        if obj.response.is_some() {
+            merged.response = obj.response;
+        }
+        if let Some(forwards) = obj.forward_to {
+            if let Some(ref mut existing) = merged.forward_to {
+                existing.extend(forwards);
+            } else {
+                merged.forward_to = Some(forwards);
             }
         }
     }
 
-    None
+    serde_json::to_string(&merged).ok()
 }
 
 /// Parse an LLM response into a HandlerDecision
@@ -182,11 +234,12 @@ pub fn extract_json_from_response(response: &str) -> Option<&str> {
 /// - Pure JSON response
 /// - JSON wrapped in markdown code blocks
 /// - JSON with surrounding text
+/// - Multiple JSON objects (merged together)
 /// - Fallback to treating entire response as direct response
 pub fn parse_llm_response(response: &str) -> HandlerDecision {
-    // First, try to extract and parse JSON
+    // First, try to extract and parse JSON (handles multiple objects)
     if let Some(json_str) = extract_json_from_response(response) {
-        if let Ok(decision_json) = LlmDecisionJson::parse(json_str) {
+        if let Ok(decision_json) = LlmDecisionJson::parse(&json_str) {
             let decision = decision_json.into_decision();
             // Only return if we got a meaningful decision
             if !matches!(decision, HandlerDecision::None) {
@@ -322,5 +375,36 @@ mod tests {
         );
         assert!(both.has_response());
         assert!(both.has_forward());
+    }
+
+    #[test]
+    fn test_parse_multiple_json_objects() {
+        // LLM sometimes returns two separate JSON objects instead of one combined
+        let response = r#"{ "response": "I can help with that." }
+{ "forward_to": [{ "agent": "Researcher", "message": "Look this up" }] }"#;
+        let decision = parse_llm_response(response);
+        assert_eq!(
+            decision,
+            HandlerDecision::ResponseAndForward {
+                content: "I can help with that.".to_string(),
+                targets: vec![ForwardTarget::new("Researcher", "Look this up")]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_multiple_json_objects_with_text() {
+        let response = r#"Here's my decision:
+{ "response": "General info here." }
+And also forwarding:
+{ "forward_to": [{ "agent": "Analyst", "message": "Analyze this" }] }"#;
+        let decision = parse_llm_response(response);
+        assert_eq!(
+            decision,
+            HandlerDecision::ResponseAndForward {
+                content: "General info here.".to_string(),
+                targets: vec![ForwardTarget::new("Analyst", "Analyze this")]
+            }
+        );
     }
 }

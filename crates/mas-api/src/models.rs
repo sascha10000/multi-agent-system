@@ -231,6 +231,19 @@ fn default_context_limit() -> usize {
     5
 }
 
+/// A single step in the agent communication trace
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTraceStep {
+    /// The agent sending the message
+    pub from: String,
+    /// The agent receiving the message
+    pub to: String,
+    /// The message content
+    pub content: String,
+    /// Type of message: "request", "response", "forward", "synthesis"
+    pub step_type: String,
+}
+
 /// Response after sending a prompt to a session
 #[derive(Debug, Serialize)]
 pub struct SessionPromptResponse {
@@ -247,6 +260,9 @@ pub struct SessionPromptResponse {
     /// Context messages that were included (if any)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<MessageResponse>,
+    /// Trace of agent communications (for verbose mode)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<AgentTraceStep>,
 }
 
 /// Request for searching session history

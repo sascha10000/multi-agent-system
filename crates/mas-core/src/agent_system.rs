@@ -5,6 +5,7 @@ use crate::conversation::ConversationStore;
 use crate::decision::{ForwardTarget, HandlerDecision};
 use crate::errors::{AgentError, Result};
 use crate::message::Message;
+use crate::tracer::{TraceCollector, TraceEvent};
 
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -92,6 +93,8 @@ struct InboxMessage {
     message: Message,
     /// Channel to send response back (None for notify messages)
     response_tx: Option<oneshot::Sender<Message>>,
+    /// Optional trace collector for recording agent communications
+    trace: Option<TraceCollector>,
 }
 
 /// Handle to a running agent
@@ -237,6 +240,9 @@ impl AgentSystem {
                 agent.name, inbox_msg.message.from, inbox_msg.message.content
             );
 
+            // Extract trace collector if present
+            let trace = inbox_msg.trace.clone();
+
             // Step 1: Auto-send to all Notify connections (fire-and-forget)
             let notify_targets: Vec<String> = agent
                 .connections
@@ -270,9 +276,16 @@ impl AgentSystem {
                 }
 
                 HandlerDecision::Forward { targets } => {
+                    // Record forward events in trace
+                    if let Some(ref t) = trace {
+                        for target in &targets {
+                            t.record(TraceEvent::forward(&agent.name, &target.agent, &target.message)).await;
+                        }
+                    }
+
                     // Forward to targets and synthesize responses
                     let forwarded_responses = system
-                        .forward_to_agents(&agent.name, &targets)
+                        .forward_to_agents_with_trace(&agent.name, &targets, trace.clone())
                         .await;
 
                     if forwarded_responses.is_empty() {
@@ -280,20 +293,30 @@ impl AgentSystem {
                         None
                     } else {
                         // Synthesize the responses
-                        handler
+                        let synthesized = handler
                             .synthesize(&inbox_msg.message, &forwarded_responses, &agent)
-                            .await
+                            .await;
+
+                        // Record synthesis event
+                        if let (Some(ref t), Some(ref content)) = (&trace, &synthesized) {
+                            t.record(TraceEvent::synthesis(&agent.name, &inbox_msg.message.from, content)).await;
+                        }
+
+                        synthesized
                     }
                 }
 
                 HandlerDecision::ResponseAndForward { content, targets } => {
-                    // Note: We can't use the response channel twice, so we include
-                    // the acknowledgment in the final synthesized response instead
-                    // of sending it immediately
+                    // Record forward events in trace
+                    if let Some(ref t) = trace {
+                        for target in &targets {
+                            t.record(TraceEvent::forward(&agent.name, &target.agent, &target.message)).await;
+                        }
+                    }
 
                     // Forward to targets
                     let forwarded_responses = system
-                        .forward_to_agents(&agent.name, &targets)
+                        .forward_to_agents_with_trace(&agent.name, &targets, trace.clone())
                         .await;
 
                     if forwarded_responses.is_empty() {
@@ -306,8 +329,12 @@ impl AgentSystem {
                             .await
                         {
                             Some(synthesized) => {
-                                // Combine acknowledgment with synthesized response
-                                Some(format!("{}\n\n{}", content, synthesized))
+                                let combined = format!("{}\n\n{}", content, synthesized);
+                                // Record synthesis event
+                                if let Some(ref t) = trace {
+                                    t.record(TraceEvent::synthesis(&agent.name, &inbox_msg.message.from, &combined)).await;
+                                }
+                                Some(combined)
                             }
                             None => Some(content),
                         }
@@ -334,12 +361,23 @@ impl AgentSystem {
         from: &str,
         targets: &[ForwardTarget],
     ) -> Vec<(String, String)> {
+        self.forward_to_agents_with_trace(from, targets, None).await
+    }
+
+    /// Forward messages to multiple agents in parallel with optional tracing
+    async fn forward_to_agents_with_trace(
+        &self,
+        from: &str,
+        targets: &[ForwardTarget],
+        trace: Option<TraceCollector>,
+    ) -> Vec<(String, String)> {
         let futures: Vec<_> = targets
             .iter()
             .map(|target| {
                 let from = from.to_string();
                 let agent_name = target.agent.clone();
                 let message = target.message.clone();
+                let trace = trace.clone();
                 async move {
                     info!("[{}] Forwarding to {}: {}", from, agent_name, message);
                     match self
@@ -348,6 +386,10 @@ impl AgentSystem {
                     {
                         Ok(SendResult::Response(msg)) => {
                             info!("[{}] Got response from {}", from, agent_name);
+                            // Record response event in trace
+                            if let Some(ref t) = trace {
+                                t.record(TraceEvent::response(&agent_name, &from, &msg.content)).await;
+                            }
                             Some((agent_name, msg.content))
                         }
                         Ok(SendResult::Timeout(e)) => {
@@ -421,6 +463,7 @@ impl AgentSystem {
             let inbox_msg = InboxMessage {
                 message,
                 response_tx: None,
+                trace: None,
             };
             receiver
                 .inbox_tx
@@ -434,6 +477,7 @@ impl AgentSystem {
             let inbox_msg = InboxMessage {
                 message,
                 response_tx: Some(response_tx),
+                trace: None,
             };
 
             receiver
@@ -508,6 +552,7 @@ impl AgentSystem {
                 let inbox_msg = InboxMessage {
                     message,
                     response_tx: None,
+                    trace: None,
                 };
                 receiver
                     .inbox_tx
@@ -522,6 +567,7 @@ impl AgentSystem {
                 let inbox_msg = InboxMessage {
                     message,
                     response_tx: Some(response_tx),
+                    trace: None,
                 };
 
                 receiver
@@ -555,6 +601,97 @@ impl AgentSystem {
                             waited: effective_timeout,
                         }))
                     }
+                }
+            }
+        }
+    }
+
+    /// Send a message with tracing enabled
+    /// The trace collector will record all agent-to-agent communications
+    pub async fn send_message_with_trace(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+        trace: TraceCollector,
+    ) -> Result<SendResult> {
+        let agents = self.agents.read().await;
+
+        // Get sender agent to check connection
+        let sender = agents
+            .get(from)
+            .ok_or_else(|| AgentError::AgentNotFound(from.to_string()))?;
+
+        // Require explicit connection for public API
+        let connection = sender
+            .agent
+            .get_connection(to)
+            .ok_or_else(|| AgentError::NoConnection {
+                from: from.to_string(),
+                to: to.to_string(),
+            })?;
+
+        // Get receiver
+        let receiver = agents
+            .get(to)
+            .ok_or_else(|| AgentError::AgentNotFound(to.to_string()))?;
+
+        // Create the message
+        let message = Message::new(from, to, content);
+        let message_id = message.id;
+
+        // Store in conversation history
+        {
+            let mut conversations = self.conversations.write().await;
+            conversations.add_message(message.clone());
+        }
+
+        // Handle based on connection type
+        match connection.connection_type {
+            ConnectionType::Notify => {
+                let inbox_msg = InboxMessage {
+                    message,
+                    response_tx: None,
+                    trace: Some(trace),
+                };
+                receiver
+                    .inbox_tx
+                    .send(inbox_msg)
+                    .await
+                    .map_err(|_| AgentError::ChannelError("Failed to send to agent inbox".into()))?;
+                Ok(SendResult::Notified)
+            }
+            ConnectionType::Blocking => {
+                let (response_tx, response_rx) = oneshot::channel();
+                let inbox_msg = InboxMessage {
+                    message,
+                    response_tx: Some(response_tx),
+                    trace: Some(trace),
+                };
+
+                receiver
+                    .inbox_tx
+                    .send(inbox_msg)
+                    .await
+                    .map_err(|_| AgentError::ChannelError("Failed to send to agent inbox".into()))?;
+
+                let effective_timeout = connection.effective_timeout(self.config.global_timeout);
+                match timeout(effective_timeout, response_rx).await {
+                    Ok(Ok(response)) => {
+                        let mut conversations = self.conversations.write().await;
+                        conversations.add_message(response.clone());
+                        Ok(SendResult::Response(response))
+                    }
+                    Ok(Err(_)) => Ok(SendResult::Timeout(AgentError::Timeout {
+                        agent: to.to_string(),
+                        message_id,
+                        waited: effective_timeout,
+                    })),
+                    Err(_) => Ok(SendResult::Timeout(AgentError::Timeout {
+                        agent: to.to_string(),
+                        message_id,
+                        waited: effective_timeout,
+                    })),
                 }
             }
         }
