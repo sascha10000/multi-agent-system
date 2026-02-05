@@ -1,12 +1,18 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import type { SystemConfigJson, AgentInfo } from '../types/api';
 import TopologyGraph from './TopologyGraph';
+import SystemBuilder from './SystemBuilder';
 
 interface ConfigEditorProps {
   onSubmit: (name: string, config: SystemConfigJson) => void;
   isLoading?: boolean;
+  initialConfig?: SystemConfigJson;
+  initialName?: string;
+  submitLabel?: string;
 }
+
+type EditorMode = 'form' | 'json' | 'preview';
 
 const EXAMPLE_CONFIG: SystemConfigJson = {
   system: {
@@ -62,23 +68,125 @@ function configToAgentInfo(config: SystemConfigJson): AgentInfo[] {
   }));
 }
 
-function ConfigEditor({ onSubmit, isLoading }: ConfigEditorProps) {
-  const [name, setName] = useState('');
-  const [configText, setConfigText] = useState(JSON.stringify(EXAMPLE_CONFIG, null, 2));
+function ConfigEditor({
+  onSubmit,
+  isLoading,
+  initialConfig,
+  initialName,
+  submitLabel = 'Create System',
+}: ConfigEditorProps) {
+  const [mode, setMode] = useState<EditorMode>('form');
+  const [name, setName] = useState(initialName ?? '');
+  const [config, setConfig] = useState<SystemConfigJson>(
+    initialConfig ?? EXAMPLE_CONFIG
+  );
+  const [configText, setConfigText] = useState(
+    JSON.stringify(initialConfig ?? EXAMPLE_CONFIG, null, 2)
+  );
   const [error, setError] = useState<string | null>(null);
-  const [showPreview, setShowPreview] = useState(true);
+  const [jsonSyncError, setJsonSyncError] = useState<string | null>(null);
+
+  // Sync config to configText when switching to JSON mode
+  useEffect(() => {
+    if (mode === 'json') {
+      setConfigText(JSON.stringify(config, null, 2));
+      setJsonSyncError(null);
+    }
+  }, [mode]);
+
+  // Parse JSON when switching away from JSON mode
+  const syncFromJson = useCallback(() => {
+    try {
+      const parsed = JSON.parse(configText) as SystemConfigJson;
+      setConfig(parsed);
+      setJsonSyncError(null);
+      return true;
+    } catch (e) {
+      setJsonSyncError(
+        `Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`
+      );
+      return false;
+    }
+  }, [configText]);
+
+  const handleModeChange = (newMode: EditorMode) => {
+    if (mode === 'json' && newMode !== 'json') {
+      // Sync JSON changes before leaving JSON mode
+      if (!syncFromJson()) {
+        return; // Stay in JSON mode if sync failed
+      }
+    }
+    setMode(newMode);
+  };
 
   const previewAgents = useMemo((): AgentInfo[] | null => {
     try {
-      const config = JSON.parse(configText) as SystemConfigJson;
-      if (config.agents && config.agents.length > 0) {
-        return configToAgentInfo(config);
+      if (mode === 'json') {
+        const parsed = JSON.parse(configText) as SystemConfigJson;
+        if (parsed.agents && parsed.agents.length > 0) {
+          return configToAgentInfo(parsed);
+        }
+      } else {
+        if (config.agents && config.agents.length > 0) {
+          return configToAgentInfo(config);
+        }
       }
     } catch {
-      // Invalid JSON, no preview
+      // Invalid config, no preview
     }
     return null;
-  }, [configText]);
+  }, [mode, config, configText]);
+
+  const validateConfig = useCallback(
+    (cfg: SystemConfigJson): string | null => {
+      if (!cfg.system?.global_timeout_secs) {
+        return 'Missing system.global_timeout_secs';
+      }
+      if (!cfg.llm_providers || Object.keys(cfg.llm_providers).length === 0) {
+        return 'At least one LLM provider is required';
+      }
+      if (!cfg.agents || cfg.agents.length === 0) {
+        return 'At least one agent is required';
+      }
+
+      // Validate agent names
+      const agentNames = new Set<string>();
+      for (const agent of cfg.agents) {
+        if (!agent.name.trim()) {
+          return 'All agents must have a name';
+        }
+        if (agentNames.has(agent.name)) {
+          return `Duplicate agent name: ${agent.name}`;
+        }
+        agentNames.add(agent.name);
+
+        if (!agent.role.trim()) {
+          return `Agent "${agent.name}" must have a role`;
+        }
+        if (!agent.system_prompt.trim()) {
+          return `Agent "${agent.name}" must have a system prompt`;
+        }
+
+        // Validate provider exists
+        if (!cfg.llm_providers[agent.handler.provider]) {
+          return `Agent "${agent.name}" references unknown provider: ${agent.handler.provider}`;
+        }
+
+        // Validate connections
+        for (const target of Object.keys(agent.connections)) {
+          if (target === agent.name) {
+            return `Agent "${agent.name}" cannot connect to itself`;
+          }
+          if (!agentNames.has(target) && !cfg.agents.some((a) => a.name === target)) {
+            return `Agent "${agent.name}" connects to unknown agent: ${target}`;
+          }
+        }
+      }
+
+      return null;
+    },
+    []
+  );
 
   const validateAndSubmit = useCallback(() => {
     setError(null);
@@ -88,66 +196,86 @@ function ConfigEditor({ onSubmit, isLoading }: ConfigEditorProps) {
       return;
     }
 
-    try {
-      const config = JSON.parse(configText) as SystemConfigJson;
+    let finalConfig: SystemConfigJson;
 
-      // Basic validation
-      if (!config.system?.global_timeout_secs) {
-        setError('Missing system.global_timeout_secs');
+    if (mode === 'json') {
+      try {
+        finalConfig = JSON.parse(configText) as SystemConfigJson;
+      } catch (e) {
+        setError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
         return;
       }
-      if (!config.llm_providers || Object.keys(config.llm_providers).length === 0) {
-        setError('At least one LLM provider is required');
-        return;
-      }
-      if (!config.agents || config.agents.length === 0) {
-        setError('At least one agent is required');
-        return;
-      }
-
-      onSubmit(name.trim(), config);
-    } catch (e) {
-      setError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+    } else {
+      finalConfig = config;
     }
-  }, [name, configText, onSubmit]);
+
+    const validationError = validateConfig(finalConfig);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    onSubmit(name.trim(), finalConfig);
+  }, [name, mode, config, configText, validateConfig, onSubmit]);
 
   const loadExample = () => {
+    setConfig(EXAMPLE_CONFIG);
     setConfigText(JSON.stringify(EXAMPLE_CONFIG, null, 2));
     setError(null);
+    setJsonSyncError(null);
   };
 
   const formatJson = () => {
     try {
       const parsed = JSON.parse(configText);
       setConfigText(JSON.stringify(parsed, null, 2));
-      setError(null);
+      setJsonSyncError(null);
     } catch (e) {
-      setError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+      setJsonSyncError(
+        `Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`
+      );
     }
   };
 
   return (
     <div className="config-editor">
       <div className="config-editor-header">
-        <h3>Create New System</h3>
+        <h3>{initialConfig ? 'Edit System' : 'Create New System'}</h3>
+        <div className="config-editor-tabs">
+          <button
+            onClick={() => handleModeChange('form')}
+            className={`config-editor-tab ${mode === 'form' ? 'config-editor-tab-active' : ''}`}
+          >
+            Form
+          </button>
+          <button
+            onClick={() => handleModeChange('json')}
+            className={`config-editor-tab ${mode === 'json' ? 'config-editor-tab-active' : ''}`}
+          >
+            JSON
+          </button>
+          <button
+            onClick={() => handleModeChange('preview')}
+            className={`config-editor-tab ${mode === 'preview' ? 'config-editor-tab-active' : ''}`}
+          >
+            Preview
+          </button>
+        </div>
         <div className="config-editor-actions">
           <button onClick={loadExample} className="btn btn-small">
             Load Example
           </button>
-          <button onClick={formatJson} className="btn btn-small">
-            Format JSON
-          </button>
-          <button
-            onClick={() => setShowPreview(!showPreview)}
-            className={`btn btn-small ${showPreview ? 'btn-primary' : ''}`}
-          >
-            {showPreview ? 'Hide Preview' : 'Show Preview'}
-          </button>
+          {mode === 'json' && (
+            <button onClick={formatJson} className="btn btn-small">
+              Format JSON
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="config-editor-body">
-        <div className="config-editor-form">
+      <div className="config-editor-body config-editor-body-single">
+        <div className="config-editor-main">
+          {/* System Name - always visible */}
           <div className="config-editor-field">
             <label htmlFor="system-name">System Name</label>
             <input
@@ -160,16 +288,43 @@ function ConfigEditor({ onSubmit, isLoading }: ConfigEditorProps) {
             />
           </div>
 
-          <div className="config-editor-field">
-            <label htmlFor="system-config">Configuration (JSON)</label>
-            <textarea
-              id="system-config"
-              value={configText}
-              onChange={(e) => setConfigText(e.target.value)}
-              className="config-editor-textarea"
-              spellCheck={false}
-            />
-          </div>
+          {/* Form Mode */}
+          {mode === 'form' && (
+            <SystemBuilder config={config} onChange={setConfig} />
+          )}
+
+          {/* JSON Mode */}
+          {mode === 'json' && (
+            <div className="config-editor-field">
+              <label htmlFor="system-config">Configuration (JSON)</label>
+              <textarea
+                id="system-config"
+                value={configText}
+                onChange={(e) => setConfigText(e.target.value)}
+                className="config-editor-textarea config-editor-textarea-tall"
+                spellCheck={false}
+              />
+              {jsonSyncError && (
+                <div className="config-editor-warning">{jsonSyncError}</div>
+              )}
+            </div>
+          )}
+
+          {/* Preview Mode */}
+          {mode === 'preview' && (
+            <div className="config-editor-preview-full">
+              <h4>Topology Preview</h4>
+              {previewAgents ? (
+                <ReactFlowProvider>
+                  <TopologyGraph agents={previewAgents} />
+                </ReactFlowProvider>
+              ) : (
+                <div className="config-editor-preview-empty">
+                  Configure agents to see topology preview
+                </div>
+              )}
+            </div>
+          )}
 
           {error && <div className="config-editor-error">{error}</div>}
 
@@ -178,24 +333,9 @@ function ConfigEditor({ onSubmit, isLoading }: ConfigEditorProps) {
             disabled={isLoading}
             className="btn btn-primary config-editor-submit"
           >
-            {isLoading ? 'Creating...' : 'Create System'}
+            {isLoading ? 'Saving...' : submitLabel}
           </button>
         </div>
-
-        {showPreview && (
-          <div className="config-editor-preview">
-            <h4>Topology Preview</h4>
-            {previewAgents ? (
-              <ReactFlowProvider>
-                <TopologyGraph agents={previewAgents} />
-              </ReactFlowProvider>
-            ) : (
-              <div className="config-editor-preview-empty">
-                Enter valid JSON to see topology preview
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
