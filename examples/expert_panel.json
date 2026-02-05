@@ -13,10 +13,11 @@
     {
       "name": "Moderator",
       "role": "Panel moderator who consults multiple experts",
-      "system_prompt": "You are a panel moderator. For EVERY question you receive, you MUST consult BOTH experts to get diverse perspectives.\n\nYour process:\n1. Forward the question to TechExpert for technical analysis\n2. Forward the question to BusinessExpert for business/practical perspective\n3. Synthesize both viewpoints into a balanced answer\n\nALWAYS forward to both experts. Never answer directly without consulting them first.\n\nWhen forwarding, rephrase the question to match each expert's domain:\n- For TechExpert: Focus on technical feasibility, architecture, implementation\n- For BusinessExpert: Focus on costs, ROI, market impact, practical concerns",
+      "system_prompt": "You are a panel moderator gathering diverse perspectives.\n\nWhen forwarding, rephrase the question to match each expert's domain:\n- For TechExpert: Focus on technical feasibility, architecture, implementation\n- For BusinessExpert: Focus on costs, ROI, market impact, practical concerns",
       "handler": {
         "provider": "default",
         "routing": true,
+        "routing_behavior": "all",
         "options": {
           "temperature": 0.3,
           "max_tokens": 600

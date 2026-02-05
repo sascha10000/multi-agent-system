@@ -95,6 +95,7 @@ The system can be configured via JSON files. See `examples/` for full examples.
         "provider": "default",
         "model": "llama3.2",
         "routing": true,
+        "routing_behavior": "all",
         "options": { "temperature": 0.3, "max_tokens": 500 }
       },
       "connections": {
@@ -113,6 +114,25 @@ The system can be configured via JSON files. See `examples/` for full examples.
 3. No self-connections allowed
 4. Provider references must exist in `llm_providers`
 5. `timeout_secs` is only meaningful for `blocking` connections
+
+### Routing Behavior
+
+When `routing: true` is set, the `routing_behavior` field controls how the agent delegates to connected agents:
+
+| Value | Description |
+|-------|-------------|
+| `"best"` | (default) Forward to the single most appropriate agent based on the query |
+| `"all"` | MUST forward to ALL connected agents and synthesize their responses |
+| `"direct_first"` | Try to answer directly, only forward if lacking expertise |
+
+Example for a panel/committee that must consult all experts:
+
+```json
+"handler": {
+  "routing": true,
+  "routing_behavior": "all"
+}
+```
 
 ## Library Usage
 

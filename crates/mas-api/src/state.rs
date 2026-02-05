@@ -3,8 +3,11 @@
 use chrono::{DateTime, Utc};
 use mas_core::AgentSystem;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::session::{create_session_manager, SharedSessionManager};
 
 /// Stored configuration metadata for a system
 #[derive(Debug, Clone)]
@@ -25,6 +28,7 @@ pub struct AgentMetadata {
     pub name: String,
     pub role: String,
     pub routing: bool,
+    pub routing_behavior: Option<String>,
     pub connections: Vec<ConnectionMetadata>,
 }
 
@@ -62,6 +66,8 @@ impl SystemEntry {
 pub struct AppState {
     /// Registry of named multi-agent systems
     systems: Arc<RwLock<HashMap<String, SystemEntry>>>,
+    /// Session manager for persistent chat sessions
+    session_manager: SharedSessionManager,
 }
 
 impl Default for AppState {
@@ -73,9 +79,26 @@ impl Default for AppState {
 impl AppState {
     /// Create a new empty application state
     pub fn new() -> Self {
+        Self::with_sessions_path(PathBuf::from("data/sessions"))
+    }
+
+    /// Create a new application state with a custom sessions path
+    pub fn with_sessions_path(sessions_path: PathBuf) -> Self {
         Self {
             systems: Arc::new(RwLock::new(HashMap::new())),
+            session_manager: create_session_manager(sessions_path),
         }
+    }
+
+    /// Get the session manager
+    pub fn session_manager(&self) -> &SharedSessionManager {
+        &self.session_manager
+    }
+
+    /// Initialize the application state (load existing sessions, etc.)
+    pub async fn init(&self) -> Result<(), String> {
+        let mut manager = self.session_manager.write().await;
+        manager.init().await.map_err(|e| e.to_string())
     }
 
     /// Register a new system

@@ -15,3 +15,15 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# Optional: memvid for semantic search (requires ffmpeg + working bindgen)
+# Enable with: cargo build --features memvid
+memvid-rs = { version = "1.2", optional = true }
+
+[features]
+default = []
+# Enable memvid-based semantic search (requires ffmpeg installed)
+memvid = ["memvid-rs"]
+
+[dev-dependencies]
+tempfile = "3.10"

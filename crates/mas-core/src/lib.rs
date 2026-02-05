@@ -8,6 +8,7 @@ pub mod decision;
 pub mod errors;
 pub mod llm;
 pub mod message;
+pub mod session_memory;
 
 // Re-export commonly used types
 pub use agent::{Agent, AgentBuilder};
@@ -17,5 +18,9 @@ pub use config_loader::{load_system_from_json, parse_config_file, validate_confi
 pub use connection::{Connection, ConnectionType};
 pub use decision::{ForwardTarget, HandlerDecision};
 pub use errors::{AgentError, Result};
-pub use llm::{LlmHandler, LlmProvider, OllamaProvider};
+pub use llm::{LlmHandler, LlmProvider, OllamaProvider, RoutingBehavior};
 pub use message::Message;
+pub use session_memory::{
+    delete_session, list_sessions, ContextHit, SessionMemory, SessionMemoryConfig,
+    SessionMemoryError, StoredMessage,
+};

@@ -55,6 +55,8 @@ pub struct AgentInfo {
     pub name: String,
     pub role: String,
     pub routing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_behavior: Option<String>,
     pub connections: Vec<ConnectionInfo>,
 }
 
@@ -128,4 +130,150 @@ pub struct UpdateSystemResponse {
     pub message: String,
     pub agent_count: usize,
     pub updated_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// Session API Models
+// ============================================================================
+
+/// Request body for creating a new session
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionRequest {
+    /// The name of the system this session is for
+    pub system_name: String,
+}
+
+/// Response after creating a session
+#[derive(Debug, Serialize)]
+pub struct CreateSessionResponse {
+    /// The unique session ID
+    pub id: String,
+    /// The system this session is for
+    pub system_name: String,
+    /// When the session was created
+    pub created_at: DateTime<Utc>,
+    pub message: String,
+}
+
+/// Summary info for a session
+#[derive(Debug, Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub system_name: String,
+    pub created_at: DateTime<Utc>,
+    pub message_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<DateTime<Utc>>,
+}
+
+/// Response listing all sessions
+#[derive(Debug, Serialize)]
+pub struct ListSessionsResponse {
+    pub sessions: Vec<SessionSummary>,
+    pub total: usize,
+}
+
+/// Detailed information about a session
+#[derive(Debug, Serialize)]
+pub struct SessionDetailResponse {
+    pub id: String,
+    pub system_name: String,
+    pub created_at: DateTime<Utc>,
+    pub message_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<DateTime<Utc>>,
+}
+
+/// Response after deleting a session
+#[derive(Debug, Serialize)]
+pub struct DeleteSessionResponse {
+    pub id: String,
+    pub message: String,
+}
+
+/// A stored message in the session
+#[derive(Debug, Serialize)]
+pub struct MessageResponse {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Response for session history
+#[derive(Debug, Serialize)]
+pub struct SessionHistoryResponse {
+    pub session_id: String,
+    pub messages: Vec<MessageResponse>,
+    pub total: usize,
+}
+
+/// Request body for sending a prompt to a session
+#[derive(Debug, Deserialize)]
+pub struct SessionPromptRequest {
+    /// The message content to send
+    pub content: String,
+    /// Optional target agent (auto-selects if not specified)
+    #[serde(default)]
+    pub target_agent: Option<String>,
+    /// Whether to include relevant context from past messages
+    #[serde(default)]
+    pub include_context: bool,
+    /// How many past messages to include as context
+    #[serde(default = "default_context_limit")]
+    pub context_limit: usize,
+}
+
+fn default_context_limit() -> usize {
+    5
+}
+
+/// Response after sending a prompt to a session
+#[derive(Debug, Serialize)]
+pub struct SessionPromptResponse {
+    /// Unique ID for this request
+    pub message_id: Uuid,
+    /// The session this was sent to
+    pub session_id: String,
+    /// The agent that processed the request
+    pub target_agent: String,
+    /// The result of processing
+    pub result: PromptResult,
+    /// Time taken to process in milliseconds
+    pub elapsed_ms: u64,
+    /// Context messages that were included (if any)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<MessageResponse>,
+}
+
+/// Request for searching session history
+#[derive(Debug, Deserialize)]
+pub struct SessionSearchRequest {
+    /// The search query
+    pub query: String,
+    /// Maximum number of results to return
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+/// A search result hit
+#[derive(Debug, Serialize)]
+pub struct SearchHit {
+    pub message: MessageResponse,
+    pub score: f32,
+}
+
+/// Response for session search
+#[derive(Debug, Serialize)]
+pub struct SessionSearchResponse {
+    pub session_id: String,
+    pub query: String,
+    pub hits: Vec<SearchHit>,
 }

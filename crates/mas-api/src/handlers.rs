@@ -4,23 +4,28 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use mas_core::{
     agent_system::EchoHandler, config_loader::SystemConfigJson, load_system_from_json,
-    validate_config, AgentBuilder, SendResult,
+    validate_config, AgentBuilder, SendResult, StoredMessage,
 };
+use serde::Deserialize;
 use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
-    AgentInfo, ConnectionInfo, DeleteSystemResponse, ListSystemsResponse, PromptResult,
-    RegisterSystemRequest, RegisterSystemResponse, SendPromptRequest, SendPromptResponse,
-    SystemDetailResponse, SystemSummary, UpdateSystemRequest, UpdateSystemResponse,
+    AgentInfo, ConnectionInfo, CreateSessionRequest, CreateSessionResponse, DeleteSessionResponse,
+    DeleteSystemResponse, ListSessionsResponse, ListSystemsResponse, MessageResponse, PromptResult,
+    RegisterSystemRequest, RegisterSystemResponse, SearchHit, SendPromptRequest, SendPromptResponse,
+    SessionDetailResponse, SessionHistoryResponse, SessionPromptRequest, SessionPromptResponse,
+    SessionSearchRequest, SessionSearchResponse, SessionSummary, SystemDetailResponse, SystemSummary,
+    UpdateSystemRequest, UpdateSystemResponse,
 };
+use crate::session::SessionError;
 use crate::state::{AgentMetadata, AppState, ConfigMetadata, ConnectionMetadata, SystemEntry};
 
 /// Extract metadata from a SystemConfigJson
@@ -43,6 +48,11 @@ fn extract_metadata(config: &SystemConfigJson) -> ConfigMetadata {
                 name: agent.name.clone(),
                 role: agent.role.clone(),
                 routing: agent.handler.routing,
+                routing_behavior: if agent.handler.routing {
+                    Some(format!("{:?}", agent.handler.routing_behavior).to_lowercase())
+                } else {
+                    None
+                },
                 connections,
             }
         })
@@ -157,6 +167,7 @@ pub async fn get_system(
             name: agent.name.clone(),
             role: agent.role.clone(),
             routing: agent.routing,
+            routing_behavior: agent.routing_behavior.clone(),
             connections: agent
                 .connections
                 .iter()
@@ -352,4 +363,346 @@ pub async fn send_prompt(
         result: prompt_result,
         elapsed_ms,
     }))
+}
+
+// ============================================================================
+// Session Handlers
+// ============================================================================
+
+/// Convert a StoredMessage to a MessageResponse
+fn stored_to_response(msg: &StoredMessage) -> MessageResponse {
+    MessageResponse {
+        id: msg.id.clone(),
+        from: msg.from.clone(),
+        to: msg.to.clone(),
+        content: msg.content.clone(),
+        timestamp: msg.timestamp,
+        metadata: msg.metadata.clone(),
+    }
+}
+
+/// Convert a SessionError to an ApiError
+fn session_to_api_error(e: SessionError) -> ApiError {
+    match e {
+        SessionError::NotFound(id) => ApiError::BadRequest(format!("Session not found: {}", id)),
+        SessionError::AlreadyExists(id) => ApiError::BadRequest(format!("Session already exists: {}", id)),
+        SessionError::SystemNotFound(name) => ApiError::SystemNotFound(name),
+        SessionError::Memory(e) => ApiError::Internal(format!("Memory error: {}", e)),
+        SessionError::Internal(msg) => ApiError::Internal(msg),
+    }
+}
+
+/// Query parameters for listing sessions
+#[derive(Debug, Deserialize)]
+pub struct ListSessionsQuery {
+    /// Filter by system name
+    pub system_name: Option<String>,
+}
+
+/// POST /api/v1/sessions - Create a new session
+pub async fn create_session(
+    State(state): State<AppState>,
+    Json(request): Json<CreateSessionRequest>,
+) -> ApiResult<(StatusCode, Json<CreateSessionResponse>)> {
+    info!("Creating session for system: {}", request.system_name);
+
+    // Verify the system exists
+    if !state.system_exists(&request.system_name).await {
+        return Err(ApiError::SystemNotFound(request.system_name));
+    }
+
+    let mut manager = state.session_manager().write().await;
+    let session_info = manager
+        .create_session(&request.system_name)
+        .await
+        .map_err(session_to_api_error)?;
+
+    info!("Created session {} for system {}", session_info.id, request.system_name);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateSessionResponse {
+            id: session_info.id,
+            system_name: session_info.system_name,
+            created_at: session_info.created_at,
+            message: "Session created successfully".to_string(),
+        }),
+    ))
+}
+
+/// GET /api/v1/sessions - List all sessions
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<ListSessionsQuery>,
+) -> Json<ListSessionsResponse> {
+    let manager = state.session_manager().read().await;
+    let sessions = manager.list_sessions(query.system_name.as_deref());
+
+    let summaries: Vec<SessionSummary> = sessions
+        .into_iter()
+        .map(|s| SessionSummary {
+            id: s.id,
+            system_name: s.system_name,
+            created_at: s.created_at,
+            message_count: s.message_count,
+            last_activity: s.last_activity,
+        })
+        .collect();
+
+    let total = summaries.len();
+
+    Json(ListSessionsResponse {
+        sessions: summaries,
+        total,
+    })
+}
+
+/// GET /api/v1/sessions/{id} - Get session details
+pub async fn get_session_detail(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<SessionDetailResponse>> {
+    let manager = state.session_manager().read().await;
+    let session = manager
+        .get_session(&session_id)
+        .ok_or_else(|| ApiError::BadRequest(format!("Session not found: {}", session_id)))?;
+
+    let info = session.info();
+
+    Ok(Json(SessionDetailResponse {
+        id: info.id,
+        system_name: info.system_name,
+        created_at: info.created_at,
+        message_count: info.message_count,
+        last_activity: info.last_activity,
+    }))
+}
+
+/// DELETE /api/v1/sessions/{id} - Delete a session
+pub async fn delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<DeleteSessionResponse>> {
+    let mut manager = state.session_manager().write().await;
+    manager
+        .delete_session(&session_id)
+        .await
+        .map_err(session_to_api_error)?;
+
+    info!("Deleted session: {}", session_id);
+
+    Ok(Json(DeleteSessionResponse {
+        id: session_id.clone(),
+        message: format!("Session '{}' deleted successfully", session_id),
+    }))
+}
+
+/// GET /api/v1/sessions/{id}/history - Get conversation history
+pub async fn get_session_history(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<HistoryParams>,
+) -> ApiResult<Json<SessionHistoryResponse>> {
+    let manager = state.session_manager().read().await;
+    let messages = manager
+        .get_history(&session_id, params.limit)
+        .map_err(session_to_api_error)?;
+
+    let total = messages.len();
+    let message_responses: Vec<MessageResponse> = messages.iter().map(stored_to_response).collect();
+
+    Ok(Json(SessionHistoryResponse {
+        session_id,
+        messages: message_responses,
+        total,
+    }))
+}
+
+/// Query parameters for history endpoint
+#[derive(Debug, Deserialize)]
+pub struct HistoryParams {
+    /// Maximum number of messages to return (most recent first)
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/sessions/{id}/search - Search session history
+pub async fn search_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionSearchRequest>,
+) -> ApiResult<Json<SessionSearchResponse>> {
+    let manager = state.session_manager().read().await;
+    let hits = manager
+        .search_session(&session_id, &params.query, params.top_k)
+        .await
+        .map_err(session_to_api_error)?;
+
+    let search_hits: Vec<SearchHit> = hits
+        .into_iter()
+        .map(|h| SearchHit {
+            message: stored_to_response(&h.message),
+            score: h.score,
+        })
+        .collect();
+
+    Ok(Json(SessionSearchResponse {
+        session_id,
+        query: params.query,
+        hits: search_hits,
+    }))
+}
+
+/// POST /api/v1/sessions/{id}/prompt - Send a prompt to a session
+pub async fn send_session_prompt(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionPromptRequest>,
+) -> ApiResult<Json<SessionPromptResponse>> {
+    let start = Instant::now();
+
+    // Get the system name for this session
+    let system_name = {
+        let manager = state.session_manager().read().await;
+        manager
+            .get_session_system(&session_id)
+            .ok_or_else(|| ApiError::BadRequest(format!("Session not found: {}", session_id)))?
+            .to_string()
+    };
+
+    // Get system and metadata
+    let system = state
+        .get_system(&system_name)
+        .await
+        .ok_or_else(|| ApiError::SystemNotFound(system_name.clone()))?;
+
+    let (metadata, _) = state
+        .get_system_metadata(&system_name)
+        .await
+        .ok_or_else(|| ApiError::SystemNotFound(system_name.clone()))?;
+
+    // Determine target agent
+    let target_agent = match request.target_agent {
+        Some(ref agent_name) => {
+            if !metadata.agent_names.contains(agent_name) {
+                return Err(ApiError::AgentNotFound(format!(
+                    "Agent '{}' not found in system '{}'. Available agents: {:?}",
+                    agent_name, system_name, metadata.agent_names
+                )));
+            }
+            agent_name.clone()
+        }
+        None => {
+            metadata
+                .agents
+                .iter()
+                .find(|a| a.name == "Coordinator")
+                .or_else(|| metadata.agents.iter().find(|a| a.routing))
+                .or_else(|| metadata.agents.first())
+                .map(|a| a.name.clone())
+                .ok_or_else(|| ApiError::Internal("No agents available in system".to_string()))?
+        }
+    };
+
+    // Optionally get context from past messages
+    let mut context_messages = Vec::new();
+    if request.include_context && request.context_limit > 0 {
+        let manager = state.session_manager().read().await;
+        if let Ok(hits) = manager.search_session(&session_id, &request.content, request.context_limit).await {
+            context_messages = hits
+                .into_iter()
+                .map(|h| stored_to_response(&h.message))
+                .collect();
+        }
+    }
+
+    // Store the user message
+    {
+        let mut manager = state.session_manager().write().await;
+        manager
+            .store_user_message(&session_id, &target_agent, &request.content)
+            .await
+            .map_err(session_to_api_error)?;
+    }
+
+    info!(
+        "Sending prompt to session '{}' system '{}' agent '{}': {}",
+        session_id,
+        system_name,
+        target_agent,
+        &request.content[..request.content.len().min(50)]
+    );
+
+    // Create a temporary "User" agent to send the message
+    let user_name = format!("_ApiUser_{}", Uuid::new_v4());
+    let user = AgentBuilder::new(&user_name)
+        .role("API User")
+        .blocking_connection(&target_agent)
+        .build();
+
+    system
+        .register_agent(user, Arc::new(EchoHandler))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create user agent: {}", e)))?;
+
+    // Send the message
+    let message_id = Uuid::new_v4();
+    let result = system
+        .send_message(&user_name, &target_agent, &request.content)
+        .await
+        .map_err(|e| {
+            error!("Error sending message: {}", e);
+            ApiError::AgentSystemError(e)
+        })?;
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    // Convert result to API response and store the response
+    let prompt_result = match &result {
+        SendResult::Response(msg) => {
+            // Store the agent response
+            let mut manager = state.session_manager().write().await;
+            let meta = serde_json::json!({ "elapsed_ms": elapsed_ms });
+            manager
+                .store_agent_response(&session_id, &msg.from, &msg.content, Some(meta))
+                .await
+                .map_err(session_to_api_error)?;
+
+            PromptResult::Response {
+                content: msg.content.clone(),
+                from: msg.from.clone(),
+            }
+        }
+        SendResult::Timeout(err) => PromptResult::Timeout {
+            message: err.to_string(),
+        },
+        SendResult::Notified => PromptResult::Notified,
+    };
+
+    Ok(Json(SessionPromptResponse {
+        message_id,
+        session_id,
+        target_agent,
+        result: prompt_result,
+        elapsed_ms,
+        context: context_messages,
+    }))
+}
+
+/// POST /api/v1/sessions/{id}/build-index - Build the search index for a session
+pub async fn build_session_index(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut manager = state.session_manager().write().await;
+    manager
+        .build_index(&session_id)
+        .await
+        .map_err(session_to_api_error)?;
+
+    info!("Built index for session: {}", session_id);
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "message": "Index built successfully"
+    })))
 }

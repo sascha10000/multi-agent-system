@@ -7,9 +7,29 @@ use crate::decision::{parse_llm_response, HandlerDecision};
 use crate::message::Message;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+
+/// Defines how a routing agent should delegate to its connected agents
+///
+/// This determines the instructions injected into the LLM prompt about
+/// when and how to forward messages to connected agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingBehavior {
+    /// Forward to the single most appropriate agent based on the query
+    /// This is the default behavior - LLM picks the best match
+    #[default]
+    Best,
+    /// MUST forward to ALL connected agents and synthesize their responses
+    /// Use this for panels, committees, or when diverse perspectives are needed
+    All,
+    /// Try to answer directly first, only forward if the agent lacks expertise
+    /// Use this for agents that should handle most queries themselves
+    DirectFirst,
+}
 
 /// A message handler that uses an LLM provider to generate responses
 ///
@@ -30,6 +50,8 @@ pub struct LlmHandler {
     conversation_store: Option<Arc<RwLock<ConversationStore>>>,
     /// Whether to enable routing mode (JSON output, connection info in prompt)
     routing_enabled: bool,
+    /// How the agent should delegate to connected agents
+    routing_behavior: RoutingBehavior,
 }
 
 impl LlmHandler {
@@ -41,6 +63,7 @@ impl LlmHandler {
             options: None,
             conversation_store: None,
             routing_enabled: false,
+            routing_behavior: RoutingBehavior::default(),
         }
     }
 
@@ -73,14 +96,25 @@ impl LlmHandler {
         self
     }
 
+    /// Set the routing behavior for this handler
+    ///
+    /// Controls how the LLM should delegate to connected agents:
+    /// - `Best` (default): Forward to the single most appropriate agent
+    /// - `All`: MUST forward to ALL connected agents and synthesize responses
+    /// - `DirectFirst`: Try to answer directly, only forward if lacking expertise
+    pub fn with_routing_behavior(mut self, behavior: RoutingBehavior) -> Self {
+        self.routing_behavior = behavior;
+        self
+    }
+
     /// Build the routing instructions to append to the system prompt
     fn build_routing_instructions(&self, agent: &Agent) -> String {
         // Collect blocking connections (these are the ones LLM can forward to)
-        let blocking_connections: Vec<(&String, &str)> = agent
+        let blocking_connections: Vec<&String> = agent
             .connections
             .iter()
             .filter(|(_, conn)| conn.connection_type == ConnectionType::Blocking)
-            .map(|(name, _)| (name, agent.connections.get(name).map(|_| "").unwrap_or("")))
+            .map(|(name, _)| name)
             .collect();
 
         if blocking_connections.is_empty() {
@@ -94,20 +128,64 @@ Do not include any text outside the JSON object."#
                 .to_string();
         }
 
-        // Build agent list with their roles
+        // Build agent list
         let mut agent_list = String::new();
-        for (name, _) in &blocking_connections {
-            // Try to get the agent's role from connections
-            // For now, just list the name - role info would need to be passed separately
+        for name in &blocking_connections {
             agent_list.push_str(&format!("- {}\n", name));
         }
 
-        format!(
-            r#"
+        // Build behavior-specific instructions
+        let behavior_instructions = match self.routing_behavior {
+            RoutingBehavior::All => {
+                // Build the list of all agents for the forward_to example
+                let all_agents_example: String = blocking_connections
+                    .iter()
+                    .map(|name| format!("{{ \"agent\": \"{}\", \"message\": \"<relevant question for this agent>\" }}", name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
 
+                format!(
+                    r#"
+IMPORTANT: You MUST forward to ALL connected agents for EVERY request.
+Your role is to gather perspectives from all agents and synthesize their responses.
+Never answer directly without consulting all agents first.
+
+Available agents you MUST forward to:
+{}
+You MUST respond with JSON in this format - include ALL agents:
+
+{{ "forward_to": [{}] }}
+
+Tailor the message to each agent's expertise. Only include valid JSON in your response."#,
+                    agent_list, all_agents_example
+                )
+            }
+            RoutingBehavior::DirectFirst => {
+                format!(
+                    r#"
+You should try to answer questions directly using your own knowledge.
+Only forward to another agent if the question is outside your expertise.
+
+Available agents you can forward to if needed:
+{}
+Respond with JSON in one of these formats:
+
+Direct response (preferred when you can answer):
+{{ "response": "your response here" }}
+
+Forward to agent (only if you lack expertise):
+{{ "forward_to": [{{ "agent": "AgentName", "message": "what to ask them" }}] }}
+
+Prefer answering directly. Only include valid JSON in your response."#,
+                    agent_list
+                )
+            }
+            RoutingBehavior::Best => {
+                format!(
+                    r#"
 You can either:
 1. Respond directly to the sender
-2. Forward the request to one of your connected agents
+2. Forward the request to one or more of your connected agents
 3. Both respond AND forward (acknowledge + delegate)
 
 Available agents you can forward to:
@@ -127,8 +205,12 @@ Both respond and forward:
 }}
 
 Choose the most appropriate action based on the request. Forward when another agent would be better suited to handle the task. Only include valid JSON in your response."#,
-            agent_list
-        )
+                    agent_list
+                )
+            }
+        };
+
+        behavior_instructions
     }
 
     /// Build LLM messages for simple mode (no routing)
@@ -361,6 +443,7 @@ pub struct LlmHandlerBuilder {
     options: Option<CompletionOptions>,
     conversation_store: Option<Arc<RwLock<ConversationStore>>>,
     routing_enabled: bool,
+    routing_behavior: RoutingBehavior,
 }
 
 impl LlmHandlerBuilder {
@@ -371,6 +454,7 @@ impl LlmHandlerBuilder {
             options: None,
             conversation_store: None,
             routing_enabled: false,
+            routing_behavior: RoutingBehavior::default(),
         }
     }
 
@@ -402,6 +486,12 @@ impl LlmHandlerBuilder {
         self
     }
 
+    /// Set the routing behavior
+    pub fn routing_behavior(mut self, behavior: RoutingBehavior) -> Self {
+        self.routing_behavior = behavior;
+        self
+    }
+
     pub fn build(self) -> LlmHandler {
         LlmHandler {
             provider: self.provider,
@@ -409,6 +499,7 @@ impl LlmHandlerBuilder {
             options: self.options,
             conversation_store: self.conversation_store,
             routing_enabled: self.routing_enabled,
+            routing_behavior: self.routing_behavior,
         }
     }
 }

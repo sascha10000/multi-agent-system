@@ -45,8 +45,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/systems/:name", get(handlers::get_system))
         .route("/systems/:name", put(handlers::update_system))
         .route("/systems/:name", delete(handlers::delete_system))
-        // Prompt handling
-        .route("/systems/:name/prompt", post(handlers::send_prompt));
+        // Prompt handling (direct system prompt, no session)
+        .route("/systems/:name/prompt", post(handlers::send_prompt))
+        // Session management
+        .route("/sessions", post(handlers::create_session))
+        .route("/sessions", get(handlers::list_sessions))
+        .route("/sessions/:id", get(handlers::get_session_detail))
+        .route("/sessions/:id", delete(handlers::delete_session))
+        .route("/sessions/:id/history", get(handlers::get_session_history))
+        .route("/sessions/:id/search", get(handlers::search_session))
+        .route("/sessions/:id/prompt", post(handlers::send_session_prompt))
+        .route("/sessions/:id/build-index", post(handlers::build_session_index));
 
     // Serve static files, checking multiple possible locations
     let static_dir = find_static_dir();

@@ -7,8 +7,10 @@ pub mod app;
 pub mod error;
 pub mod handlers;
 pub mod models;
+pub mod session;
 pub mod state;
 
 pub use app::create_router;
 pub use error::{ApiError, ApiResult};
+pub use session::{create_session_manager, SessionError, SessionInfo, SessionManager, SharedSessionManager};
 pub use state::AppState;

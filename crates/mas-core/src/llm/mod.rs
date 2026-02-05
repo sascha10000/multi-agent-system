@@ -25,7 +25,7 @@ mod handler;
 mod ollama;
 mod provider;
 
-pub use handler::{LlmHandler, LlmHandlerBuilder};
+pub use handler::{LlmHandler, LlmHandlerBuilder, RoutingBehavior};
 pub use ollama::OllamaProvider;
 pub use provider::{
     CompletionOptions, CompletionResponse, LlmError, LlmMessage, LlmProvider, Role, TokenUsage,

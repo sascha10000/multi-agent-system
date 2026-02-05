@@ -41,7 +41,7 @@ use crate::agent_system::AgentSystem;
 use crate::config::SystemConfig;
 use crate::connection::Connection;
 use crate::errors::{AgentError, Result};
-use crate::llm::{CompletionOptions, LlmHandler, LlmProvider, OllamaProvider};
+use crate::llm::{CompletionOptions, LlmHandler, LlmProvider, OllamaProvider, RoutingBehavior};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -121,6 +121,12 @@ pub struct HandlerConfig {
     /// Enable routing mode (LLM can decide to forward to connected agents)
     #[serde(default)]
     pub routing: bool,
+    /// How the agent should delegate to connected agents (only used when routing=true)
+    /// - "best" (default): Forward to the single most appropriate agent
+    /// - "all": MUST forward to ALL connected agents and synthesize responses
+    /// - "direct_first": Try to answer directly, only forward if lacking expertise
+    #[serde(default)]
+    pub routing_behavior: RoutingBehavior,
     /// Completion options
     #[serde(default)]
     pub options: CompletionOptionsConfig,
@@ -422,8 +428,13 @@ async fn register_agent_from_config(
 
     // Register based on routing mode
     if config.handler.routing {
-        handler = handler.with_routing();
-        debug!("Registering '{}' as routing agent", config.name);
+        handler = handler
+            .with_routing()
+            .with_routing_behavior(config.handler.routing_behavior);
+        debug!(
+            "Registering '{}' as routing agent with behavior {:?}",
+            config.name, config.handler.routing_behavior
+        );
         AgentSystem::register_routing_agent(system, agent, Arc::new(handler)).await?;
     } else {
         debug!("Registering '{}' as simple agent", config.name);

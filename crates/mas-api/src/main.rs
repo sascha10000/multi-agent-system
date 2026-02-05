@@ -37,12 +37,23 @@ fn print_usage() {
     println!("  --port <PORT>  Port to listen on (default: 3000)");
     println!("  --help         Show this help message");
     println!();
-    println!("API Endpoints:");
-    println!("  POST   /api/v1/systems              Register a new system");
-    println!("  GET    /api/v1/systems              List all systems");
-    println!("  GET    /api/v1/systems/{{name}}       Get system details");
-    println!("  DELETE /api/v1/systems/{{name}}       Remove a system");
-    println!("  POST   /api/v1/systems/{{name}}/prompt  Send a prompt");
+    println!("API Endpoints - Systems:");
+    println!("  POST   /api/v1/systems                Register a new system");
+    println!("  GET    /api/v1/systems                List all systems");
+    println!("  GET    /api/v1/systems/{{name}}         Get system details");
+    println!("  PUT    /api/v1/systems/{{name}}         Update a system");
+    println!("  DELETE /api/v1/systems/{{name}}         Remove a system");
+    println!("  POST   /api/v1/systems/{{name}}/prompt  Send a prompt (no session)");
+    println!();
+    println!("API Endpoints - Sessions:");
+    println!("  POST   /api/v1/sessions                      Create a new session");
+    println!("  GET    /api/v1/sessions                      List all sessions");
+    println!("  GET    /api/v1/sessions/{{id}}                 Get session details");
+    println!("  DELETE /api/v1/sessions/{{id}}                 Delete a session");
+    println!("  GET    /api/v1/sessions/{{id}}/history         Get conversation history");
+    println!("  GET    /api/v1/sessions/{{id}}/search?q=...    Semantic search in session");
+    println!("  POST   /api/v1/sessions/{{id}}/prompt          Send a prompt (with memory)");
+    println!("  POST   /api/v1/sessions/{{id}}/build-index     Build search index");
 }
 
 #[tokio::main]
@@ -66,11 +77,17 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let state = AppState::new();
 
+    // Initialize application state (load existing sessions)
+    if let Err(e) = state.init().await {
+        tracing::warn!("Failed to initialize state: {}", e);
+    }
+
     // Create router
     let app = create_router(state);
 
     info!("Starting Multi-Agent System API server on {}", addr);
     info!("API available at http://{}/api/v1/", addr);
+    info!("Session data stored in data/sessions/");
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;
