@@ -83,3 +83,22 @@ export interface ApiError {
   error: string;
   details?: string;
 }
+
+// Session list types
+export interface SessionSummary {
+  id: string;
+  system_name: string;
+  created_at: string;
+  message_count: number;
+  last_activity?: string;
+}
+
+export interface ListSessionsResponse {
+  sessions: SessionSummary[];
+  total: number;
+}
+
+export interface DeleteSessionResponse {
+  id: string;
+  message: string;
+}

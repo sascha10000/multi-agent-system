@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState, useMemo } from 'react';
+import { useCallback, useState, useMemo, useRef } from 'react';
 import {
   ReactFlow,
   Controls,
@@ -21,7 +21,7 @@ import '@xyflow/react/dist/style.css';
 import AgentNode from '../components/AgentNode';
 import AgentModal from '../components/AgentModal';
 import ChatPanel from '../components/ChatPanel';
-import type { AgentNodeData, SystemConfigJson, AgentConfig } from '../types/agent';
+import type { AgentNodeData, SystemConfigJson, AgentConfig, RoutingBehavior } from '../types/agent';
 
 // Initial nodes for demo
 const initialNodes: Node<AgentNodeData>[] = [
@@ -31,7 +31,6 @@ const initialNodes: Node<AgentNodeData>[] = [
     position: { x: 250, y: 50 },
     data: {
       name: 'Coordinator',
-      role: 'Routes requests to specialists',
       systemPrompt: 'You coordinate work between team members.',
       provider: 'default',
       model: 'llama3.2',
@@ -47,7 +46,6 @@ const initialNodes: Node<AgentNodeData>[] = [
     position: { x: 100, y: 250 },
     data: {
       name: 'Researcher',
-      role: 'Finds information',
       systemPrompt: 'You are an expert researcher.',
       provider: 'default',
       model: 'llama3.2',
@@ -63,7 +61,6 @@ const initialNodes: Node<AgentNodeData>[] = [
     position: { x: 400, y: 250 },
     data: {
       name: 'Analyst',
-      role: 'Analyzes data',
       systemPrompt: 'You analyze information and provide insights.',
       provider: 'default',
       model: 'llama3.2',
@@ -91,6 +88,9 @@ export default function EditorPage() {
   // Chat panel state
   const [chatOpen, setChatOpen] = useState(false);
   const [systemName, setSystemName] = useState('my-agent-system');
+
+  // File input ref for JSON import
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Node types configuration - memoized to prevent re-renders
   const nodeTypes: NodeTypes = useMemo(() => ({ agent: AgentNode }), []);
@@ -128,7 +128,6 @@ export default function EditorPage() {
       },
       data: {
         name: 'New Agent',
-        role: 'Assistant',
         systemPrompt: 'You are a helpful assistant.',
         provider: 'default',
         model: 'llama3.2',
@@ -195,7 +194,6 @@ export default function EditorPage() {
 
       return {
         name: data.name,
-        role: data.role,
         system_prompt: data.systemPrompt,
         handler: {
           provider: data.provider,
@@ -237,6 +235,98 @@ export default function EditorPage() {
     console.log('Exported configuration:', config);
   }, [exportConfig]);
 
+  // Import JSON configuration file
+  const handleImport = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const content = e.target?.result as string;
+        const config: SystemConfigJson = JSON.parse(content);
+
+        if (!config.agents || !Array.isArray(config.agents)) {
+          alert('Invalid configuration: missing agents array');
+          return;
+        }
+
+        // Create a map from agent name to node ID
+        const agentNameToId: Record<string, string> = {};
+
+        // Calculate grid positions for agents
+        const cols = Math.ceil(Math.sqrt(config.agents.length));
+        const spacingX = 250;
+        const spacingY = 200;
+
+        // Convert agents to nodes
+        const newNodes: Node<AgentNodeData>[] = config.agents.map((agent, index) => {
+          const nodeId = `imported-${Date.now()}-${index}`;
+          agentNameToId[agent.name] = nodeId;
+
+          const row = Math.floor(index / cols);
+          const col = index % cols;
+
+          return {
+            id: nodeId,
+            type: 'agent',
+            position: {
+              x: 100 + col * spacingX,
+              y: 50 + row * spacingY,
+            },
+            data: {
+              name: agent.name,
+              systemPrompt: agent.system_prompt || 'You are a helpful assistant.',
+              provider: agent.handler?.provider || 'default',
+              model: agent.handler?.model || 'llama3.2',
+              routing: agent.handler?.routing || false,
+              routingBehavior: (agent.handler?.routing_behavior as RoutingBehavior) || 'best',
+              temperature: agent.handler?.options?.temperature ?? 0.7,
+              maxTokens: agent.handler?.options?.max_tokens ?? 1000,
+            },
+          };
+        });
+
+        // Convert connections to edges
+        const newEdges: Edge[] = [];
+        config.agents.forEach((agent) => {
+          if (agent.connections) {
+            const sourceId = agentNameToId[agent.name];
+            Object.keys(agent.connections).forEach((targetName) => {
+              const targetId = agentNameToId[targetName];
+              if (sourceId && targetId) {
+                newEdges.push({
+                  id: `e-${sourceId}-${targetId}`,
+                  source: sourceId,
+                  target: targetId,
+                  animated: true,
+                });
+              }
+            });
+          }
+        });
+
+        // Update the editor with imported data
+        setNodes(newNodes);
+        setEdges(newEdges);
+
+        // Update system name from file name (remove .json extension)
+        const baseName = file.name.replace(/\.json$/i, '');
+        setSystemName(baseName);
+
+        console.log('Imported configuration:', config);
+        alert(`Imported ${newNodes.length} agents and ${newEdges.length} connections`);
+      } catch (error) {
+        console.error('Failed to parse JSON:', error);
+        alert('Failed to parse JSON file. Please ensure it is valid JSON.');
+      }
+    };
+
+    reader.readAsText(file);
+    // Reset file input so the same file can be imported again
+    event.target.value = '';
+  }, [setNodes, setEdges]);
+
   // Get current config for chat
   const currentConfig = useMemo(() => exportConfig(), [exportConfig]);
 
@@ -265,6 +355,15 @@ export default function EditorPage() {
           maskColor="rgba(0, 0, 0, 0.1)"
         />
 
+        {/* Hidden file input for JSON import */}
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleImport}
+          accept=".json,application/json"
+          className="hidden"
+        />
+
         {/* Toolbar */}
         <Panel position="top-left" className="flex gap-2">
           <button
@@ -275,6 +374,15 @@ export default function EditorPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
             Add Agent
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-amber-700 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m4-8l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Import JSON
           </button>
           <button
             onClick={handleExport}

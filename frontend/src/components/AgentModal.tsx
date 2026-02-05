@@ -86,19 +86,6 @@ export default function AgentModal({
 
             <div>
               <label className="block text-sm font-medium text-zinc-300 mb-1">
-                Role
-              </label>
-              <input
-                type="text"
-                name="role"
-                value={formData.role}
-                onChange={handleChange}
-                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-1">
                 System Prompt
               </label>
               <textarea

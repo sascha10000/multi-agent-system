@@ -6,7 +6,8 @@ import type { SystemConfigJson } from '../types/agent';
 import type {
   SessionPromptResponse,
   CreateSessionResponse,
-  PromptResult,
+  SessionSummary,
+  MessageResponse,
   AgentTraceStep,
 } from '../types/api';
 
@@ -38,6 +39,12 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const [verboseMode, setVerboseMode] = useState(false);
   const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
   const [selectedTraceStep, setSelectedTraceStep] = useState<AgentTraceStep | null>(null);
+
+  // Session list state
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [currentView, setCurrentView] = useState<'sessions' | 'chat'>('sessions');
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -73,12 +80,123 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     return parts.length > 0 ? parts.join(': ') : fallback;
   };
 
-  // Initialize system and session when panel opens
+  // Fetch sessions for this system
+  const fetchSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/sessions?system_name=${encodeURIComponent(systemName)}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(extractErrorMessage(errorData, 'Failed to fetch sessions'));
+      }
+      const data = await res.json();
+      // Sort by last_activity or created_at descending
+      const sorted = (data.sessions || []).sort((a: SessionSummary, b: SessionSummary) => {
+        const aDate = a.last_activity || a.created_at;
+        const bDate = b.last_activity || b.created_at;
+        return new Date(bDate).getTime() - new Date(aDate).getTime();
+      });
+      setSessions(sorted);
+    } catch (err) {
+      console.error('Failed to fetch sessions:', err);
+      // Don't show error in UI, just show empty list
+      setSessions([]);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [systemName]);
+
+  // Load an existing session's history
+  const loadSession = useCallback(async (id: string) => {
+    setError(null);
+    setStatus('creating_session');
+    setCurrentView('chat');
+
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${id}/history`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(extractErrorMessage(errorData, 'Failed to load session'));
+      }
+
+      const data = await res.json();
+      setSessionId(id);
+
+      // Convert MessageResponse[] to ChatMessage[]
+      const chatMessages: ChatMessage[] = (data.messages || []).map((msg: MessageResponse) => ({
+        id: msg.id,
+        role: msg.from === 'user' ? 'user' : 'assistant' as const,
+        content: msg.content,
+        agent: msg.from !== 'user' ? msg.from : undefined,
+        timestamp: new Date(msg.timestamp),
+      }));
+
+      // Add welcome message at the start if we have history
+      if (chatMessages.length > 0) {
+        setMessages([
+          {
+            id: 'welcome',
+            role: 'system',
+            content: `Resumed session with "${systemName}". ${chatMessages.length} messages loaded.`,
+            timestamp: new Date(),
+          },
+          ...chatMessages,
+        ]);
+      } else {
+        setMessages([{
+          id: 'welcome',
+          role: 'system',
+          content: `Connected to "${systemName}". This session has no messages yet.`,
+          timestamp: new Date(),
+        }]);
+      }
+
+      setStatus('ready');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load session';
+      setError(message);
+      setStatus('error');
+      setCurrentView('sessions');
+    }
+  }, [systemName]);
+
+  // Delete a session
+  const deleteSession = useCallback(async (id: string) => {
+    setDeletingSessionId(id);
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(extractErrorMessage(errorData, 'Failed to delete session'));
+      }
+
+      // Remove from local state
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+
+      // If we deleted the currently active session, reset
+      if (sessionId === id) {
+        setSessionId(null);
+        setMessages([]);
+        setStatus('idle');
+        setCurrentView('sessions');
+      }
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+      setError(err instanceof Error ? err.message : 'Failed to delete session');
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }, [sessionId]);
+
+  // Initialize system and create a NEW session
   const initializeSession = useCallback(async () => {
-    if (sessionId || status === 'registering' || status === 'creating_session') return;
+    if (status === 'registering' || status === 'creating_session') return;
 
     setError(null);
     setStatus('registering');
+    setCurrentView('chat');
 
     try {
       // First, try to register the system (or update if it exists)
@@ -138,13 +256,14 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       setStatus('error');
       console.error('Session initialization error:', err);
     }
-  }, [config, systemName, sessionId, status]);
+  }, [config, systemName, status]);
 
+  // Fetch sessions when panel opens
   useEffect(() => {
-    if (isOpen && status === 'idle') {
-      initializeSession();
+    if (isOpen && currentView === 'sessions') {
+      fetchSessions();
     }
-  }, [isOpen, status, initializeSession]);
+  }, [isOpen, currentView, fetchSessions]);
 
   const sendMessage = async () => {
     if (!input.trim() || !sessionId || isLoading) return;
@@ -229,6 +348,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     setStatus('idle');
     setError(null);
     setExpandedTraces(new Set());
+    setCurrentView('sessions');
   };
 
   const toggleTraceExpanded = (messageId: string) => {
@@ -273,6 +393,23 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     }
   };
 
+  // Format date for session list
+  const formatSessionDate = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -280,35 +417,48 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700 bg-zinc-800">
         <div className="flex items-center gap-3">
-          <div className={`w-2 h-2 rounded-full ${status === 'ready' ? 'bg-green-500' : status === 'error' ? 'bg-red-500' : 'bg-yellow-500 animate-pulse'}`} />
-          <div>
-            <h2 className="font-semibold text-zinc-100">Chat</h2>
-            <p className="text-xs text-zinc-400">{systemName}</p>
-          </div>
+          {currentView === 'chat' && (
+            <button
+              onClick={() => setCurrentView('sessions')}
+              className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
+              title="Back to sessions"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+          {currentView === 'sessions' ? (
+            <div>
+              <h2 className="font-semibold text-zinc-100">Sessions</h2>
+              <p className="text-xs text-zinc-400">{systemName}</p>
+            </div>
+          ) : (
+            <>
+              <div className={`w-2 h-2 rounded-full ${status === 'ready' ? 'bg-green-500' : status === 'error' ? 'bg-red-500' : 'bg-yellow-500 animate-pulse'}`} />
+              <div>
+                <h2 className="font-semibold text-zinc-100">Chat</h2>
+                <p className="text-xs text-zinc-400">{systemName}</p>
+              </div>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setVerboseMode(!verboseMode)}
-            className={`p-1.5 rounded transition-colors ${
-              verboseMode
-                ? 'text-amber-400 bg-amber-900/30 hover:bg-amber-900/50'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
-            }`}
-            title={verboseMode ? 'Hide agent trace' : 'Show agent trace'}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </button>
-          <button
-            onClick={resetSession}
-            className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
-            title="New session"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
+          {currentView === 'chat' && (
+            <button
+              onClick={() => setVerboseMode(!verboseMode)}
+              className={`p-1.5 rounded transition-colors ${
+                verboseMode
+                  ? 'text-amber-400 bg-amber-900/30 hover:bg-amber-900/50'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
+              }`}
+              title={verboseMode ? 'Hide agent trace' : 'Show agent trace'}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={onClose}
             className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
@@ -337,9 +487,102 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         </div>
       )}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {status === 'error' && (
+      {/* Sessions List View */}
+      {currentView === 'sessions' && (
+        <div className="flex-1 overflow-y-auto">
+          {/* New Session Button */}
+          <div className="p-4 border-b border-zinc-700">
+            <button
+              onClick={initializeSession}
+              className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              New Session
+            </button>
+          </div>
+
+          {/* Sessions List */}
+          <div className="p-4 space-y-2">
+            {sessionsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="flex items-center gap-2 text-zinc-400">
+                  <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  <span>Loading sessions...</span>
+                </div>
+              </div>
+            ) : sessions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center mb-4">
+                  <svg className="w-6 h-6 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                </div>
+                <h3 className="text-zinc-300 font-medium mb-1">No sessions yet</h3>
+                <p className="text-zinc-500 text-sm">Start a new session to chat with your agents</p>
+              </div>
+            ) : (
+              sessions.map((session) => (
+                <div
+                  key={session.id}
+                  className="group bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 rounded-lg p-3 cursor-pointer transition-colors"
+                  onClick={() => loadSession(session.id)}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-zinc-100 truncate">
+                          Session
+                        </span>
+                        <span className="text-xs text-zinc-500 truncate">
+                          {session.id.slice(0, 8)}...
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 mt-1">
+                        <span className="text-xs text-zinc-400">
+                          {session.message_count} message{session.message_count !== 1 ? 's' : ''}
+                        </span>
+                        <span className="text-xs text-zinc-500">
+                          {formatSessionDate(session.last_activity || session.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteSession(session.id);
+                      }}
+                      disabled={deletingSessionId === session.id}
+                      className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-900/20 rounded opacity-0 group-hover:opacity-100 transition-all disabled:opacity-50"
+                      title="Delete session"
+                    >
+                      {deletingSessionId === session.id ? (
+                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Chat View - Messages */}
+      {currentView === 'chat' && (
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {status === 'error' && (
           <div className="flex flex-col items-center justify-center py-8 px-4">
             <div className="w-12 h-12 rounded-full bg-red-900/30 flex items-center justify-center mb-4">
               <svg className="w-6 h-6 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -457,33 +700,36 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </div>
         )}
 
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      <div className="p-4 border-t border-zinc-700 bg-zinc-800">
-        <div className="flex gap-2">
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={status === 'ready' ? 'Type a message...' : 'Connecting...'}
-            disabled={status !== 'ready' || isLoading}
-            className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-zinc-100 placeholder-zinc-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:opacity-50"
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || status !== 'ready' || isLoading}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-          </button>
+          <div ref={messagesEndRef} />
         </div>
-      </div>
+      )}
+
+      {/* Input - only show in chat view */}
+      {currentView === 'chat' && (
+        <div className="p-4 border-t border-zinc-700 bg-zinc-800">
+          <div className="flex gap-2">
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={status === 'ready' ? 'Type a message...' : 'Connecting...'}
+              disabled={status !== 'ready' || isLoading}
+              className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-zinc-100 placeholder-zinc-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!input.trim() || status !== 'ready' || isLoading}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Trace Step Modal */}
       {selectedTraceStep && (

@@ -41,9 +41,8 @@ function AgentNode({ data, selected }: AgentNodeProps) {
 
       {/* Body */}
       <div className="px-3 py-2">
-        <p className="text-xs text-zinc-400 truncate">{data.role}</p>
         {data.routing && (
-          <p className="text-[10px] text-zinc-500 mt-1">
+          <p className="text-[10px] text-zinc-500">
             Behavior: {data.routingBehavior}
           </p>
         )}

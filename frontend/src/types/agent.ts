@@ -20,7 +20,6 @@ export interface ConnectionConfig {
 
 export interface AgentConfig {
   name: string;
-  role?: string;
   system_prompt?: string;
   handler?: HandlerConfig;
   connections?: Record<string, ConnectionConfig>;
@@ -48,7 +47,6 @@ export interface SystemConfigJson {
 export interface AgentNodeData {
   [key: string]: unknown;
   name: string;
-  role: string;
   systemPrompt: string;
   provider: string;
   model: string;
@@ -61,7 +59,6 @@ export interface AgentNodeData {
 // Default values for new agents
 export const defaultAgentData: AgentNodeData = {
   name: 'New Agent',
-  role: 'Assistant',
   systemPrompt: 'You are a helpful assistant.',
   provider: 'default',
   model: 'llama3.2',
