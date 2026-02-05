@@ -20,7 +20,8 @@ import '@xyflow/react/dist/style.css';
 
 import AgentNode from '../components/AgentNode';
 import AgentModal from '../components/AgentModal';
-import type { AgentNodeData, defaultAgentData, SystemConfigJson, AgentConfig } from '../types/agent';
+import ChatPanel from '../components/ChatPanel';
+import type { AgentNodeData, SystemConfigJson, AgentConfig } from '../types/agent';
 
 // Initial nodes for demo
 const initialNodes: Node<AgentNodeData>[] = [
@@ -86,6 +87,10 @@ export default function EditorPage() {
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  // Chat panel state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [systemName, setSystemName] = useState('my-agent-system');
 
   // Node types configuration - memoized to prevent re-renders
   const nodeTypes: NodeTypes = useMemo(() => ({ agent: AgentNode }), []);
@@ -232,6 +237,9 @@ export default function EditorPage() {
     console.log('Exported configuration:', config);
   }, [exportConfig]);
 
+  // Get current config for chat
+  const currentConfig = useMemo(() => exportConfig(), [exportConfig]);
+
   return (
     <div className="w-screen h-screen">
       <ReactFlow
@@ -277,6 +285,15 @@ export default function EditorPage() {
             </svg>
             Export JSON
           </button>
+          <button
+            onClick={() => setChatOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-green-700 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            Chat
+          </button>
         </Panel>
 
         {/* Help text */}
@@ -295,6 +312,14 @@ export default function EditorPage() {
           setModalOpen(false);
           setSelectedNodeId(null);
         }}
+      />
+
+      {/* Chat Panel */}
+      <ChatPanel
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+        config={currentConfig}
+        systemName={systemName}
       />
     </div>
   );
