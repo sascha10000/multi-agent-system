@@ -1,3 +1,25 @@
-target/
-backend/target/
+# Build artifacts
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

@@ -1,0 +1,25 @@
+[package]
+name = "mas-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "REST API for the Multi-Agent System"
+
+[[bin]]
+name = "mas-api"
+path = "src/main.rs"
+
+[dependencies]
+mas-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }

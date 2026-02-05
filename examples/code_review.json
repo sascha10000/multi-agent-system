@@ -1,0 +1,63 @@
+{
+    "system": {
+        "global_timeout_secs": 120
+    },
+    "llm_providers": {
+        "default": {
+            "type": "ollama",
+            "base_url": "http://localhost:11434",
+            "default_model": "gemma3:4b"
+        }
+    },
+    "agents": [
+        {
+            "name": "LeadReviewer",
+            "role": "Lead code reviewer who coordinates the review process",
+            "system_prompt": "You are a lead code reviewer coordinating a thorough code review process.\n\nFor EVERY code review request:\n1. Forward to SecurityReviewer for security analysis\n2. Forward to PerformanceReviewer for performance analysis\n3. Compile their feedback into a comprehensive review\n\nALWAYS consult both reviewers. Your job is to synthesize their findings into actionable feedback.\n\nWhen forwarding:\n- To SecurityReviewer: Ask them to analyze security vulnerabilities, input validation, authentication issues\n- To PerformanceReviewer: Ask them to analyze performance bottlenecks, algorithmic complexity, resource usage\n\nIn your final synthesis, prioritize issues by severity (Critical > High > Medium > Low).",
+            "handler": {
+                "provider": "default",
+                "routing": true,
+                "options": {
+                    "temperature": 0.2,
+                    "max_tokens": 800
+                }
+            },
+            "connections": {
+                "SecurityReviewer": {
+                    "type": "blocking",
+                    "timeout_secs": 90
+                },
+                "PerformanceReviewer": {
+                    "type": "blocking",
+                    "timeout_secs": 90
+                }
+            }
+        },
+        {
+            "name": "SecurityReviewer",
+            "role": "Security-focused code reviewer",
+            "system_prompt": "You are a security-focused code reviewer specializing in identifying vulnerabilities.\n\nWhen reviewing code, look for:\n- SQL injection, XSS, CSRF vulnerabilities\n- Improper input validation or sanitization\n- Authentication and authorization flaws\n- Sensitive data exposure\n- Insecure dependencies\n- Missing security headers\n\nFormat your response as:\n- CRITICAL: [issues that must be fixed before merge]\n- HIGH: [serious issues to address soon]\n- MEDIUM: [issues to track]\n- Recommendations: [best practices to consider]\n\nBe specific and provide code examples when suggesting fixes.",
+            "handler": {
+                "provider": "default",
+                "options": {
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                }
+            },
+            "connections": {}
+        },
+        {
+            "name": "PerformanceReviewer",
+            "role": "Performance-focused code reviewer",
+            "system_prompt": "You are a performance-focused code reviewer specializing in optimization.\n\nWhen reviewing code, look for:\n- Algorithmic complexity issues (O(n²) when O(n) is possible)\n- Unnecessary memory allocations\n- N+1 query problems\n- Missing caching opportunities\n- Blocking operations that could be async\n- Resource leaks\n\nFormat your response as:\n- CRITICAL: [severe performance issues]\n- HIGH: [significant bottlenecks]\n- MEDIUM: [optimization opportunities]\n- Recommendations: [performance best practices]\n\nProvide specific suggestions with code examples when possible.",
+            "handler": {
+                "provider": "default",
+                "options": {
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                }
+            },
+            "connections": {}
+        }
+    ]
+}

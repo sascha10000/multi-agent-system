@@ -1,0 +1,78 @@
+{
+    "system": {
+        "global_timeout_secs": 60
+    },
+    "llm_providers": {
+        "default": {
+            "type": "ollama",
+            "base_url": "http://localhost:11434",
+            "default_model": "gemma3:4b"
+        }
+    },
+    "agents": [
+        {
+            "name": "Coordinator",
+            "role": "Routes requests to specialists",
+            "system_prompt": "You are a coordinator agent. Your job is to understand user requests and decide the best way to handle them.\n\nFor research questions (asking about facts, history, how things work), forward to the Researcher.\nFor analysis tasks (comparing options, evaluating data, making recommendations), forward to the Analyst.\nFor simple greetings or meta-questions about yourself, respond directly.\nFor complex requests needing both research and analysis, forward to both agents.",
+            "handler": {
+                "provider": "default",
+                "routing": true,
+                "options": {
+                    "temperature": 0.3,
+                    "max_tokens": 500
+                }
+            },
+            "connections": {
+                "Researcher": {
+                    "type": "blocking",
+                    "timeout_secs": 120
+                },
+                "Analyst": {
+                    "type": "blocking",
+                    "timeout_secs": 120
+                },
+                "Logger": {
+                    "type": "notify"
+                }
+            }
+        },
+        {
+            "name": "Researcher",
+            "role": "Research specialist",
+            "system_prompt": "You are a research specialist. When asked about a topic, provide factual information and findings. Be thorough but concise (3-5 sentences). Focus on facts and established knowledge.",
+            "handler": {
+                "provider": "default",
+                "options": {
+                    "temperature": 0.5,
+                    "max_tokens": 300
+                }
+            },
+            "connections": {}
+        },
+        {
+            "name": "Analyst",
+            "role": "Analysis specialist",
+            "system_prompt": "You are an analysis specialist. When asked to analyze something, provide insights, comparisons, and recommendations. Be concise (3-5 sentences). Focus on evaluation and actionable insights.",
+            "handler": {
+                "provider": "default",
+                "options": {
+                    "temperature": 0.5,
+                    "max_tokens": 300
+                }
+            },
+            "connections": {}
+        },
+        {
+            "name": "Logger",
+            "role": "Activity logger",
+            "system_prompt": "You log system activities. Simply acknowledge receipt of messages.",
+            "handler": {
+                "provider": "default",
+                "options": {
+                    "max_tokens": 50
+                }
+            },
+            "connections": {}
+        }
+    ]
+}
