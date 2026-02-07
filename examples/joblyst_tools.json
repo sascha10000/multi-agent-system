@@ -1,0 +1,61 @@
+{
+  "system": { "global_timeout_secs": 60 },
+  "llm_providers": {
+    "default": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "default_model": "llama3.2"
+    }
+  },
+  "agents": [
+    {
+      "name": "JobSearchAssistant",
+      "system_prompt": "You are a helpful job search assistant. You can search for jobs using the JobSearch tool. When users ask about jobs, use the tool to find relevant listings. Format the results in a clear, readable way.",
+      "handler": {
+        "provider": "default",
+        "routing": true,
+        "routing_behavior": "best"
+      },
+      "connections": {
+        "JobSearch": { "type": "blocking", "timeout_secs": 30 }
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "JobSearch",
+      "description": "Search for job listings from the Joblyst job board. Can search by keywords, location, job type, and more.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search keywords (e.g., 'software engineer', 'data scientist')"
+          },
+          "location": {
+            "type": "string",
+            "description": "Job location (e.g., 'Berlin', 'Remote')"
+          },
+          "job_type": {
+            "type": "string",
+            "description": "Type of job (e.g., 'full-time', 'part-time', 'contract')"
+          }
+        },
+        "required": ["query"]
+      },
+      "endpoint": {
+        "url": "https://joblyst.sascha10k.biz/mcp",
+        "type": "mcp",
+        "mcp_tool_name": "search_jobs",
+        "headers": {
+          "Accept": "application/json, text/event-stream"
+        }
+      },
+      "response_mapping": {
+        "extract_path": "$.result.content",
+        "format": "json"
+      },
+      "timeout_secs": 30
+    }
+  ]
+}

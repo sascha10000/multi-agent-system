@@ -16,8 +16,6 @@ pub struct Connection {
     pub connection_type: ConnectionType,
     /// Per-connection timeout override (takes priority over global timeout)
     pub timeout: Option<Duration>,
-    /// Role/description of the target agent (for routing decisions)
-    pub target_role: Option<String>,
 }
 
 impl Connection {
@@ -26,16 +24,6 @@ impl Connection {
         Self {
             connection_type: ConnectionType::Blocking,
             timeout,
-            target_role: None,
-        }
-    }
-
-    /// Create a new blocking connection with target role info
-    pub fn blocking_with_role(timeout: Option<Duration>, role: impl Into<String>) -> Self {
-        Self {
-            connection_type: ConnectionType::Blocking,
-            timeout,
-            target_role: Some(role.into()),
         }
     }
 
@@ -44,23 +32,7 @@ impl Connection {
         Self {
             connection_type: ConnectionType::Notify,
             timeout: None,
-            target_role: None,
         }
-    }
-
-    /// Create a new notify connection with target role info
-    pub fn notify_with_role(role: impl Into<String>) -> Self {
-        Self {
-            connection_type: ConnectionType::Notify,
-            timeout: None,
-            target_role: Some(role.into()),
-        }
-    }
-
-    /// Set the target role
-    pub fn with_target_role(mut self, role: impl Into<String>) -> Self {
-        self.target_role = Some(role.into());
-        self
     }
 
     /// Check if this is a blocking connection

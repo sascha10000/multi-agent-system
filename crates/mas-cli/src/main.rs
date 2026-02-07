@@ -160,7 +160,6 @@ async fn run_prompt(path: &PathBuf, prompt: &str, target: Option<&str>) -> anyho
 
     // Create a temporary "User" agent that connects to the target
     let user = AgentBuilder::new("_User")
-        .role("CLI User")
         .blocking_connection(&target_agent)
         .build();
 
@@ -234,7 +233,6 @@ async fn run_basic_demo_scenarios() -> anyhow::Result<()> {
     //                     +--Notify----> Logger ----Blocking---> AlertHandler
 
     let coordinator = AgentBuilder::new("Coordinator")
-        .role("Orchestrates research and analysis tasks")
         .system_prompt("You coordinate work between researchers and analysts.")
         .blocking_connection("Researcher")
         .blocking_connection("Analyst")
@@ -242,24 +240,20 @@ async fn run_basic_demo_scenarios() -> anyhow::Result<()> {
         .build();
 
     let researcher = AgentBuilder::new("Researcher")
-        .role("Conducts research on topics")
         .system_prompt("You research topics and provide detailed findings.")
         .blocking_connection("Analyst")
         .build();
 
     let analyst = AgentBuilder::new("Analyst")
-        .role("Analyzes data and provides insights")
         .system_prompt("You analyze data and provide actionable insights.")
         .build();
 
     let logger = AgentBuilder::new("Logger")
-        .role("Logs all activities")
         .system_prompt("You log activities and alert on anomalies.")
         .blocking_connection("AlertHandler")
         .build();
 
     let alert_handler = AgentBuilder::new("AlertHandler")
-        .role("Handles system alerts")
         .system_prompt("You process and respond to system alerts.")
         .build();
 
@@ -388,7 +382,6 @@ async fn run_llm_routing_demo() -> anyhow::Result<()> {
     // - Forward to both (for comprehensive requests)
 
     let coordinator = AgentBuilder::new("Coordinator")
-        .role("AI coordinator that routes requests to specialists")
         .system_prompt(
             "You are a coordinator agent. Your job is to understand user requests and decide the best way to handle them.
 
@@ -403,21 +396,18 @@ For complex requests needing both research and analysis, forward to both agents.
         .build();
 
     let researcher = AgentBuilder::new("Researcher")
-        .role("Research specialist")
         .system_prompt(
             "You are a research specialist. When asked about a topic, provide factual information and findings. Be thorough but concise (3-5 sentences). Focus on facts and established knowledge."
         )
         .build();
 
     let analyst = AgentBuilder::new("Analyst")
-        .role("Analysis specialist")
         .system_prompt(
             "You are an analysis specialist. When asked to analyze something, provide insights, comparisons, and recommendations. Be concise (3-5 sentences). Focus on evaluation and actionable insights."
         )
         .build();
 
     let logger = AgentBuilder::new("Logger")
-        .role("Activity logger")
         .system_prompt("You log all system activities.")
         .build();
 
@@ -464,7 +454,6 @@ For complex requests needing both research and analysis, forward to both agents.
 
     // Create a "User" agent that can send to Coordinator
     let user = AgentBuilder::new("User")
-        .role("User interface")
         .blocking_connection("Coordinator")
         .build();
     system.register_agent(user, Arc::new(EchoHandler)).await?;

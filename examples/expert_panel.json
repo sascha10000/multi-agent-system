@@ -12,7 +12,6 @@
   "agents": [
     {
       "name": "Moderator",
-      "role": "Panel moderator who consults multiple experts",
       "system_prompt": "You are a panel moderator gathering diverse perspectives.\n\nWhen forwarding, rephrase the question to match each expert's domain:\n- For TechExpert: Focus on technical feasibility, architecture, implementation\n- For BusinessExpert: Focus on costs, ROI, market impact, practical concerns",
       "handler": {
         "provider": "default",
@@ -31,7 +30,6 @@
     },
     {
       "name": "TechExpert",
-      "role": "Technical expert focusing on engineering and architecture",
       "system_prompt": "You are a senior technical expert with deep knowledge in software engineering, system architecture, and emerging technologies.\n\nWhen answering questions:\n- Focus on technical feasibility and implementation details\n- Consider scalability, performance, and maintainability\n- Mention relevant technologies, frameworks, or patterns\n- Be specific about technical trade-offs\n- Keep responses concise (3-5 sentences)\n\nProvide honest technical assessment, including potential challenges.",
       "handler": {
         "provider": "default",
@@ -44,7 +42,6 @@
     },
     {
       "name": "BusinessExpert",
-      "role": "Business strategist focusing on practical and commercial aspects",
       "system_prompt": "You are a seasoned business strategist with expertise in product management, market analysis, and organizational dynamics.\n\nWhen answering questions:\n- Focus on business value and ROI\n- Consider market trends and competitive landscape\n- Think about resource constraints and timelines\n- Address stakeholder concerns and change management\n- Keep responses concise (3-5 sentences)\n\nProvide practical business perspective, including risks and opportunities.",
       "handler": {
         "provider": "default",
@@ -57,7 +54,6 @@
     },
     {
       "name": "Logger",
-      "role": "Activity logger for audit trail",
       "system_prompt": "You log all panel activities for record-keeping.",
       "handler": {
         "provider": "default",

@@ -6,19 +6,16 @@ use std::collections::HashMap;
 pub struct Agent {
     /// Unique identifier for this agent
     pub name: String,
-    /// Describes the agent's general task/capabilities (for LLM context)
-    pub role: String,
-    /// Base instructions for the LLM (renamed from 'prompt' for clarity)
+    /// Base instructions for the LLM
     pub system_prompt: String,
     /// Connections to other agents (key is the target agent's name)
     pub connections: HashMap<String, Connection>,
 }
 
 impl Agent {
-    pub fn new(name: impl Into<String>, role: impl Into<String>, system_prompt: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            role: role.into(),
             system_prompt: system_prompt.into(),
             connections: HashMap::new(),
         }
@@ -49,7 +46,6 @@ impl Agent {
 /// Builder for creating agents with a fluent API
 pub struct AgentBuilder {
     name: String,
-    role: String,
     system_prompt: String,
     connections: HashMap<String, Connection>,
 }
@@ -58,15 +54,9 @@ impl AgentBuilder {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            role: String::new(),
             system_prompt: String::new(),
             connections: HashMap::new(),
         }
-    }
-
-    pub fn role(mut self, role: impl Into<String>) -> Self {
-        self.role = role.into();
-        self
     }
 
     pub fn system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
@@ -105,7 +95,6 @@ impl AgentBuilder {
     pub fn build(self) -> Agent {
         Agent {
             name: self.name,
-            role: self.role,
             system_prompt: self.system_prompt,
             connections: self.connections,
         }
@@ -120,7 +109,6 @@ mod tests {
     #[test]
     fn test_agent_builder() {
         let agent = AgentBuilder::new("Coordinator")
-            .role("Orchestrates tasks")
             .system_prompt("You are a coordinator agent.")
             .blocking_connection("Worker1")
             .blocking_connection_with_timeout("Worker2", Duration::from_secs(5))

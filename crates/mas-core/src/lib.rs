@@ -9,11 +9,13 @@ pub mod errors;
 pub mod llm;
 pub mod message;
 pub mod session_memory;
+pub mod tool;
+pub mod tool_handler;
 pub mod tracer;
 
 // Re-export commonly used types
 pub use agent::{Agent, AgentBuilder};
-pub use agent_system::{AgentSystem, MessageHandler, RoutingHandler, SendResult};
+pub use agent_system::{AgentSystem, MessageHandler, RoutingHandler, SendResult, ToolInfo};
 pub use config::SystemConfig;
 pub use config_loader::{load_system_from_json, parse_config_file, validate_config, SystemConfigJson};
 pub use connection::{Connection, ConnectionType};
@@ -25,4 +27,6 @@ pub use session_memory::{
     delete_session, list_sessions, ContextHit, SessionMemory, SessionMemoryConfig,
     SessionMemoryError, StoredMessage,
 };
+pub use tool::{EndpointType, HttpMethod, ResponseFormat, ResponseMapping, Tool, ToolConfig, ToolEndpoint};
+pub use tool_handler::ToolHandler;
 pub use tracer::{TraceCollector, TraceEvent, TraceEventType};

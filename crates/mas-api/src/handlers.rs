@@ -9,8 +9,8 @@ use axum::{
     Json,
 };
 use mas_core::{
-    agent_system::EchoHandler, config_loader::SystemConfigJson, load_system_from_json,
-    validate_config, AgentBuilder, SendResult, StoredMessage, TraceCollector, TraceEventType,
+    agent_system::EchoHandler, load_system_from_json, validate_config, AgentBuilder, SendResult,
+    StoredMessage, TraceCollector, TraceEventType,
 };
 use serde::Deserialize;
 use tracing::{error, info};
@@ -26,45 +26,7 @@ use crate::models::{
     SessionSummary, SystemDetailResponse, SystemSummary, UpdateSystemRequest, UpdateSystemResponse,
 };
 use crate::session::SessionError;
-use crate::state::{AgentMetadata, AppState, ConfigMetadata, ConnectionMetadata, SystemEntry};
-
-/// Extract metadata from a SystemConfigJson
-fn extract_metadata(config: &SystemConfigJson) -> ConfigMetadata {
-    let agents: Vec<AgentMetadata> = config
-        .agents
-        .iter()
-        .map(|agent| {
-            let connections: Vec<ConnectionMetadata> = agent
-                .connections
-                .iter()
-                .map(|(target, conn)| ConnectionMetadata {
-                    target: target.clone(),
-                    connection_type: conn.connection_type.clone(),
-                    timeout_secs: conn.timeout_secs,
-                })
-                .collect();
-
-            AgentMetadata {
-                name: agent.name.clone(),
-                role: agent.role.clone(),
-                routing: agent.handler.routing,
-                routing_behavior: if agent.handler.routing {
-                    Some(format!("{:?}", agent.handler.routing_behavior).to_lowercase())
-                } else {
-                    None
-                },
-                connections,
-            }
-        })
-        .collect();
-
-    ConfigMetadata {
-        agent_count: config.agents.len(),
-        agent_names: config.agents.iter().map(|a| a.name.clone()).collect(),
-        global_timeout_secs: config.system.global_timeout_secs,
-        agents,
-    }
-}
+use crate::state::{extract_metadata, AppState, SystemEntry};
 
 /// POST /api/v1/systems - Register a new multi-agent system
 pub async fn create_system(
@@ -104,13 +66,20 @@ pub async fn create_system(
     let _ = std::fs::remove_file(&temp_file);
 
     // Create the entry and register
-    let entry = SystemEntry::new(system, metadata.clone());
+    let entry = SystemEntry::new(system, metadata.clone(), request.config.clone());
     let created_at = entry.created_at;
 
     state
         .register_system(request.name.clone(), entry)
         .await
         .map_err(|e| ApiError::SystemAlreadyExists(e))?;
+
+    // Persist the configuration to disk
+    state
+        .system_store()
+        .save(&request.name, &request.config)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to persist system config: {}", e)))?;
 
     info!(
         "System '{}' registered with {} agents",
@@ -165,7 +134,6 @@ pub async fn get_system(
         .iter()
         .map(|agent| AgentInfo {
             name: agent.name.clone(),
-            role: agent.role.clone(),
             routing: agent.routing,
             routing_behavior: agent.routing_behavior.clone(),
             connections: agent
@@ -196,6 +164,12 @@ pub async fn delete_system(
 ) -> ApiResult<Json<DeleteSystemResponse>> {
     if !state.remove_system(&name).await {
         return Err(ApiError::SystemNotFound(name));
+    }
+
+    // Remove the persisted configuration (ignore errors if file doesn't exist)
+    if let Err(e) = state.system_store().delete(&name).await {
+        // Only log, don't fail the request - the in-memory system was removed
+        tracing::warn!("Failed to delete persisted config for '{}': {}", name, e);
     }
 
     info!("System '{}' removed", name);
@@ -249,13 +223,20 @@ pub async fn update_system(
     state.remove_system(&name).await;
 
     // Create the new entry and register
-    let entry = SystemEntry::new(system, metadata.clone());
+    let entry = SystemEntry::new(system, metadata.clone(), request.config.clone());
     let updated_at = entry.created_at;
 
     state
         .register_system(name.clone(), entry)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to re-register system: {}", e)))?;
+
+    // Persist the updated configuration (overwrites existing)
+    state
+        .system_store()
+        .save(&name, &request.config)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to persist system config: {}", e)))?;
 
     info!(
         "System '{}' updated with {} agents",
@@ -324,7 +305,6 @@ pub async fn send_prompt(
     // Create a temporary "User" agent to send the message
     let user_name = format!("_ApiUser_{}", Uuid::new_v4());
     let user = AgentBuilder::new(&user_name)
-        .role("API User")
         .blocking_connection(&target_agent)
         .build();
 
@@ -654,7 +634,6 @@ pub async fn send_session_prompt(
     // Create a temporary "User" agent to send the message
     let user_name = format!("_ApiUser_{}", Uuid::new_v4());
     let user = AgentBuilder::new(&user_name)
-        .role("API User")
         .blocking_connection(&target_agent)
         .build();
 

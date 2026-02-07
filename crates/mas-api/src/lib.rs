@@ -13,4 +13,4 @@ pub mod state;
 pub use app::create_router;
 pub use error::{ApiError, ApiResult};
 pub use session::{create_session_manager, SessionError, SessionInfo, SessionManager, SharedSessionManager};
-pub use state::AppState;
+pub use state::{AppState, SystemStore, SystemStoreError};

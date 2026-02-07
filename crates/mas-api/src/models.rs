@@ -53,7 +53,6 @@ pub struct SystemDetailResponse {
 #[derive(Debug, Serialize)]
 pub struct AgentInfo {
     pub name: String,
-    pub role: String,
     pub routing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_behavior: Option<String>,

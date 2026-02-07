@@ -25,6 +25,9 @@ serde_json = "1.0"
 # HTTP client
 reqwest = { version = "0.12", features = ["json"] }
 
+# MCP (Model Context Protocol) client
+rmcp = { version = "0.14", features = ["client", "transport-streamable-http-client-reqwest"] }
+
 # Utilities
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

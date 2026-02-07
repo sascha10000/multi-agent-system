@@ -21,7 +21,6 @@
 //!   "agents": [
 //!     {
 //!       "name": "Coordinator",
-//!       "role": "Routes requests",
 //!       "system_prompt": "You coordinate work.",
 //!       "handler": {
 //!         "provider": "default",
@@ -42,6 +41,8 @@ use crate::config::SystemConfig;
 use crate::connection::Connection;
 use crate::errors::{AgentError, Result};
 use crate::llm::{CompletionOptions, LlmHandler, LlmProvider, OllamaProvider, RoutingBehavior};
+use crate::tool::{Tool, ToolConfig};
+use crate::tool_handler::ToolHandler;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -59,6 +60,9 @@ pub struct SystemConfigJson {
     pub llm_providers: HashMap<String, LlmProviderConfig>,
     /// Agent definitions
     pub agents: Vec<AgentConfig>,
+    /// Tool definitions (optional)
+    #[serde(default)]
+    pub tools: Vec<ToolConfig>,
 }
 
 /// System-wide settings
@@ -98,9 +102,6 @@ pub struct LlmProviderConfig {
 pub struct AgentConfig {
     /// Unique name for the agent
     pub name: String,
-    /// Agent's role description
-    #[serde(default)]
-    pub role: String,
     /// System prompt for the LLM
     #[serde(default)]
     pub system_prompt: String,
@@ -186,7 +187,13 @@ pub enum ConfigError {
     #[error("Duplicate agent name: {0}")]
     DuplicateAgentName(String),
 
-    #[error("Agent '{from}' connects to unknown agent '{to}'")]
+    #[error("Duplicate tool name: {0}")]
+    DuplicateToolName(String),
+
+    #[error("Tool name '{0}' conflicts with agent name")]
+    ToolNameConflictsWithAgent(String),
+
+    #[error("Agent '{from}' connects to unknown agent or tool '{to}'")]
     UnknownConnectionTarget { from: String, to: String },
 
     #[error("Agent '{0}' has a self-connection")]
@@ -203,6 +210,9 @@ pub enum ConfigError {
 
     #[error("LLM provider error: {0}")]
     LlmError(String),
+
+    #[error("Tool '{0}' has invalid endpoint URL: {1}")]
+    InvalidToolEndpoint(String, String),
 }
 
 impl From<ConfigError> for AgentError {
@@ -231,7 +241,36 @@ pub fn validate_config(config: &SystemConfigJson) -> std::result::Result<(), Con
         }
     }
 
-    // Validate connections (second pass - need all agent names first)
+    // Validate tools
+    let mut tool_names: HashSet<String> = HashSet::new();
+    for tool in &config.tools {
+        // Check for duplicate tool names
+        if !tool_names.insert(tool.name.clone()) {
+            return Err(ConfigError::DuplicateToolName(tool.name.clone()));
+        }
+
+        // Check tool name doesn't conflict with agent name
+        if agent_names.contains(&tool.name) {
+            return Err(ConfigError::ToolNameConflictsWithAgent(tool.name.clone()));
+        }
+
+        // Validate tool endpoint URL (basic check)
+        if tool.endpoint.url.is_empty() {
+            return Err(ConfigError::InvalidToolEndpoint(
+                tool.name.clone(),
+                "URL cannot be empty".to_string(),
+            ));
+        }
+    }
+
+    // Combined set of all valid targets (agents + tools)
+    let all_targets: HashSet<&str> = agent_names
+        .iter()
+        .map(|s| s.as_str())
+        .chain(tool_names.iter().map(|s| s.as_str()))
+        .collect();
+
+    // Validate connections (second pass - need all agent and tool names first)
     for agent in &config.agents {
         for (target, conn_config) in &agent.connections {
             // Check for self-connection
@@ -239,8 +278,8 @@ pub fn validate_config(config: &SystemConfigJson) -> std::result::Result<(), Con
                 return Err(ConfigError::SelfConnection(agent.name.clone()));
             }
 
-            // Check target exists
-            if !agent_names.contains(target) {
+            // Check target exists (can be agent or tool)
+            if !all_targets.contains(target.as_str()) {
                 return Err(ConfigError::UnknownConnectionTarget {
                     from: agent.name.clone(),
                     to: target.clone(),
@@ -332,8 +371,9 @@ pub async fn load_system_from_json(json_path: &Path) -> Result<Arc<AgentSystem>>
     // Validate configuration
     validate_config(&config)?;
     info!(
-        "Configuration validated: {} agents, {} providers",
+        "Configuration validated: {} agents, {} tools, {} providers",
         config.agents.len(),
+        config.tools.len(),
         config.llm_providers.len()
     );
 
@@ -346,16 +386,21 @@ pub async fn load_system_from_json(json_path: &Path) -> Result<Arc<AgentSystem>>
     // Create the agent system (wrapped in Arc for routing agents)
     let system = Arc::new(AgentSystem::new(system_config));
 
-    // Collect agent roles for routing decisions (so routing agents know what each agent does)
-    let agent_roles: HashMap<String, String> = config
-        .agents
+    // Build tool descriptions map for LLM routing
+    let tool_descriptions: HashMap<String, String> = config
+        .tools
         .iter()
-        .map(|a| (a.name.clone(), a.role.clone()))
+        .map(|t| (t.name.clone(), t.description.clone()))
         .collect();
 
-    // Register all agents
+    // Register all tools first (so agents can connect to them)
+    for tool_config in &config.tools {
+        register_tool_from_config(&system, tool_config).await?;
+    }
+
+    // Register all agents (with tool descriptions for routing)
     for agent_config in &config.agents {
-        register_agent_from_config(system.clone(), agent_config, &providers, &agent_roles).await?;
+        register_agent_from_config(system.clone(), agent_config, &providers, &tool_descriptions).await?;
     }
 
     info!("Agent system loaded successfully");
@@ -372,33 +417,35 @@ pub fn parse_config_file(json_path: &Path) -> std::result::Result<SystemConfigJs
     Ok(config)
 }
 
+/// Register a tool from its configuration
+async fn register_tool_from_config(system: &AgentSystem, config: &ToolConfig) -> Result<()> {
+    let tool = Arc::new(Tool::new(config.clone()));
+    let handler = Arc::new(ToolHandler::new(tool.clone()));
+
+    system.register_tool(tool, handler).await?;
+    debug!("Registered tool '{}' -> {}", config.name, config.endpoint.url);
+
+    Ok(())
+}
+
 /// Register a single agent from its configuration
 async fn register_agent_from_config(
     system: Arc<AgentSystem>,
     config: &AgentConfig,
     providers: &HashMap<String, Arc<dyn LlmProvider>>,
-    agent_roles: &HashMap<String, String>,
+    tool_descriptions: &HashMap<String, String>,
 ) -> Result<()> {
     // Build the agent
-    let mut builder = AgentBuilder::new(&config.name)
-        .role(&config.role)
-        .system_prompt(&config.system_prompt);
+    let mut builder = AgentBuilder::new(&config.name).system_prompt(&config.system_prompt);
 
-    // Add connections (with target agent's role for routing decisions)
+    // Add connections
     for (target, conn_config) in &config.connections {
-        let target_role = agent_roles.get(target).cloned();
         let connection = match conn_config.connection_type.to_lowercase().as_str() {
             "blocking" => {
                 let timeout = conn_config.timeout_secs.map(Duration::from_secs);
-                let mut conn = Connection::blocking(timeout);
-                conn.target_role = target_role;
-                conn
+                Connection::blocking(timeout)
             }
-            "notify" => {
-                let mut conn = Connection::notify();
-                conn.target_role = target_role;
-                conn
-            }
+            "notify" => Connection::notify(),
             _ => unreachable!(), // Already validated
         };
         builder = builder.connection(target, connection);
@@ -453,9 +500,19 @@ async fn register_agent_from_config(
 
     // Register based on routing mode
     if should_route {
+        // Filter tool descriptions to only include tools this agent is connected to
+        let connected_tool_descriptions: HashMap<String, String> = config
+            .connections
+            .keys()
+            .filter_map(|name| {
+                tool_descriptions.get(name).map(|desc| (name.clone(), desc.clone()))
+            })
+            .collect();
+
         handler = handler
             .with_routing()
-            .with_routing_behavior(config.handler.routing_behavior);
+            .with_routing_behavior(config.handler.routing_behavior)
+            .with_tool_descriptions(connected_tool_descriptions);
         debug!(
             "Registering '{}' as routing agent with behavior {:?} (auto={}, explicit={})",
             config.name, config.handler.routing_behavior, has_blocking_connections, config.handler.routing
@@ -516,7 +573,6 @@ mod tests {
             "agents": [
                 {
                     "name": "Coordinator",
-                    "role": "Routes requests",
                     "system_prompt": "You coordinate work.",
                     "handler": {
                         "provider": "default",
@@ -532,7 +588,6 @@ mod tests {
                 },
                 {
                     "name": "Worker",
-                    "role": "Does work",
                     "handler": { "provider": "fast" },
                     "connections": {}
                 }
@@ -689,5 +744,139 @@ mod tests {
         assert_eq!(options.max_tokens, Some(100));
         assert_eq!(options.top_p, Some(0.9));
         assert_eq!(options.stop, Some(vec!["END".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_config_with_tools() {
+        let json = r#"{
+            "system": { "global_timeout_secs": 60 },
+            "llm_providers": { "default": { "type": "ollama" } },
+            "agents": [
+                {
+                    "name": "Assistant",
+                    "handler": { "provider": "default", "routing": true },
+                    "connections": {
+                        "WebSearch": { "type": "blocking" }
+                    }
+                }
+            ],
+            "tools": [
+                {
+                    "name": "WebSearch",
+                    "description": "Search the web",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } }
+                    },
+                    "endpoint": {
+                        "url": "https://api.example.com/search",
+                        "method": "POST",
+                        "body_template": { "q": "${query}" }
+                    },
+                    "timeout_secs": 30
+                }
+            ]
+        }"#;
+
+        let config: SystemConfigJson = serde_json::from_str(json).unwrap();
+        assert_eq!(config.agents.len(), 1);
+        assert_eq!(config.tools.len(), 1);
+        assert_eq!(config.tools[0].name, "WebSearch");
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_duplicate_tool_name() {
+        let json = r#"{
+            "system": {},
+            "llm_providers": { "default": { "type": "ollama" } },
+            "agents": [],
+            "tools": [
+                {
+                    "name": "Tool1",
+                    "description": "First tool",
+                    "endpoint": { "url": "https://example.com/1" }
+                },
+                {
+                    "name": "Tool1",
+                    "description": "Duplicate",
+                    "endpoint": { "url": "https://example.com/2" }
+                }
+            ]
+        }"#;
+
+        let config: SystemConfigJson = serde_json::from_str(json).unwrap();
+        let result = validate_config(&config);
+        assert!(matches!(result, Err(ConfigError::DuplicateToolName(_))));
+    }
+
+    #[test]
+    fn test_validate_tool_name_conflicts_with_agent() {
+        let json = r#"{
+            "system": {},
+            "llm_providers": { "default": { "type": "ollama" } },
+            "agents": [
+                { "name": "MyName", "handler": { "provider": "default" } }
+            ],
+            "tools": [
+                {
+                    "name": "MyName",
+                    "description": "Conflicts with agent",
+                    "endpoint": { "url": "https://example.com" }
+                }
+            ]
+        }"#;
+
+        let config: SystemConfigJson = serde_json::from_str(json).unwrap();
+        let result = validate_config(&config);
+        assert!(matches!(result, Err(ConfigError::ToolNameConflictsWithAgent(_))));
+    }
+
+    #[test]
+    fn test_validate_agent_can_connect_to_tool() {
+        let json = r#"{
+            "system": {},
+            "llm_providers": { "default": { "type": "ollama" } },
+            "agents": [
+                {
+                    "name": "Agent",
+                    "handler": { "provider": "default" },
+                    "connections": {
+                        "MyTool": { "type": "blocking" }
+                    }
+                }
+            ],
+            "tools": [
+                {
+                    "name": "MyTool",
+                    "description": "A tool",
+                    "endpoint": { "url": "https://example.com" }
+                }
+            ]
+        }"#;
+
+        let config: SystemConfigJson = serde_json::from_str(json).unwrap();
+        // Should validate successfully - agent can connect to tool
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_tool_url() {
+        let json = r#"{
+            "system": {},
+            "llm_providers": { "default": { "type": "ollama" } },
+            "agents": [],
+            "tools": [
+                {
+                    "name": "BadTool",
+                    "description": "Invalid",
+                    "endpoint": { "url": "" }
+                }
+            ]
+        }"#;
+
+        let config: SystemConfigJson = serde_json::from_str(json).unwrap();
+        let result = validate_config(&config);
+        assert!(matches!(result, Err(ConfigError::InvalidToolEndpoint(_, _))));
     }
 }

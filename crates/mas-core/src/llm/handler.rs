@@ -52,6 +52,9 @@ pub struct LlmHandler {
     routing_enabled: bool,
     /// How the agent should delegate to connected agents
     routing_behavior: RoutingBehavior,
+    /// Descriptions for connected tools (name -> description)
+    /// Used to enrich the routing prompt with tool capabilities
+    tool_descriptions: std::collections::HashMap<String, String>,
 }
 
 impl LlmHandler {
@@ -64,6 +67,7 @@ impl LlmHandler {
             conversation_store: None,
             routing_enabled: false,
             routing_behavior: RoutingBehavior::default(),
+            tool_descriptions: std::collections::HashMap::new(),
         }
     }
 
@@ -107,6 +111,15 @@ impl LlmHandler {
         self
     }
 
+    /// Set descriptions for tools connected to this agent
+    ///
+    /// These descriptions are included in the routing prompt so the LLM knows
+    /// what each tool does and can make informed routing decisions.
+    pub fn with_tool_descriptions(mut self, descriptions: std::collections::HashMap<String, String>) -> Self {
+        self.tool_descriptions = descriptions;
+        self
+    }
+
     /// Build the routing instructions to append to the system prompt
     fn build_routing_instructions(&self, agent: &Agent) -> String {
         // Collect blocking connections (these are the ones LLM can forward to)
@@ -127,12 +140,15 @@ Do not include any text outside the JSON object."#
                 .to_string();
         }
 
-        // Build agent list with roles for better routing decisions
+        // Build agent/tool list for routing decisions
+        // Include descriptions for tools so LLM knows what they do
         let mut agent_list = String::new();
-        for (name, conn) in &blocking_connections {
-            if let Some(ref role) = conn.target_role {
-                agent_list.push_str(&format!("- {} ({})\n", name, role));
+        for (name, _conn) in &blocking_connections {
+            if let Some(description) = self.tool_descriptions.get(*name) {
+                // This is a tool - include its description
+                agent_list.push_str(&format!("- {} (Tool): {}\n", name, description));
             } else {
+                // This is an agent - just show the name
                 agent_list.push_str(&format!("- {}\n", name));
             }
         }
@@ -184,34 +200,45 @@ Prefer answering directly. Only include valid JSON in your response."#,
                 )
             }
             RoutingBehavior::Best => {
+                // Check if we have any tools
+                let has_tools = self.tool_descriptions.values().any(|_| true);
+                let tool_instructions = if has_tools {
+                    r#"
+
+TOOL USAGE: When forwarding to a Tool, the message MUST be valid JSON with the tool's parameters.
+For example, to call a search tool: { "forward_to": [{ "agent": "JobSearch", "message": "{\"query\": \"software engineer\"}" }] }
+The message field must be a JSON string containing the parameters the tool expects."#
+                } else {
+                    ""
+                };
+
                 format!(
                     r#"
 You can either:
 1. Respond directly to the sender
-2. Forward the request to the BEST matching agent based on their expertise
+2. Forward the request to the BEST matching agent or tool
 3. Both respond AND forward (acknowledge + delegate)
 
-Available agents you can forward to (with their expertise):
+Available agents/tools you can forward to:
 {}
-IMPORTANT: Choose the agent whose expertise BEST MATCHES the question topic.
-Look at each agent's role description in parentheses to decide who should handle the request.
+IMPORTANT: Choose the agent/tool that BEST MATCHES the question topic.{}
 
 Respond with JSON in one of these formats:
 
-Direct response (only if no agent matches the topic):
+Direct response (only if no agent/tool matches the topic):
 {{ "response": "your response here" }}
 
-Forward to the best agent:
-{{ "forward_to": [{{ "agent": "AgentName", "message": "the question to ask" }}] }}
+Forward to the best agent/tool:
+{{ "forward_to": [{{ "agent": "AgentName", "message": "the question or JSON parameters" }}] }}
 
 Both respond and forward:
 {{
   "response": "I'll check with our specialist.",
-  "forward_to": [{{ "agent": "AgentName", "message": "the question to ask" }}]
+  "forward_to": [{{ "agent": "AgentName", "message": "the question or JSON parameters" }}]
 }}
 
 Only include valid JSON in your response."#,
-                    agent_list
+                    agent_list, tool_instructions
                 )
             }
         };
@@ -333,6 +360,110 @@ Only include valid JSON in your response."#,
         messages
     }
 
+    /// Enforce "all" routing behavior by ensuring all blocking connections are forwarded to
+    ///
+    /// When routing_behavior is All, we must forward to every blocking connection regardless
+    /// of what the LLM decided. This handles cases where smaller LLMs don't follow instructions.
+    fn enforce_all_routing(
+        &self,
+        decision: HandlerDecision,
+        message: &Message,
+        agent: &Agent,
+    ) -> HandlerDecision {
+        use crate::decision::ForwardTarget;
+
+        // Get all blocking connection names
+        let blocking_agents: Vec<String> = agent
+            .connections
+            .iter()
+            .filter(|(_, conn)| conn.connection_type == ConnectionType::Blocking)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if blocking_agents.is_empty() {
+            // No blocking connections - nothing to enforce
+            return decision;
+        }
+
+        // Build the complete set of forward targets for all blocking connections
+        let build_all_targets = |base_message: &str| -> Vec<ForwardTarget> {
+            blocking_agents
+                .iter()
+                .map(|name| ForwardTarget::new(name.clone(), base_message.to_string()))
+                .collect()
+        };
+
+        match decision {
+            HandlerDecision::Response { content: _ } => {
+                // LLM tried to respond directly when it should forward to ALL
+                // Convert to Forward with the original message for all agents
+                info!(
+                    "[{}] 'all' routing: LLM responded directly, converting to forward all",
+                    agent.name
+                );
+                HandlerDecision::Forward {
+                    targets: build_all_targets(&message.content),
+                }
+            }
+            HandlerDecision::Forward { targets } => {
+                // Check if all blocking agents are covered
+                let covered: std::collections::HashSet<_> =
+                    targets.iter().map(|t| t.agent.as_str()).collect();
+                let all_covered = blocking_agents.iter().all(|name| covered.contains(name.as_str()));
+
+                if all_covered {
+                    // All agents are covered - keep the LLM's tailored messages
+                    HandlerDecision::Forward { targets }
+                } else {
+                    // Missing some agents - rebuild with all targets using original message
+                    info!(
+                        "[{}] 'all' routing: LLM only forwarded to {:?}, enforcing all {:?}",
+                        agent.name,
+                        covered.iter().collect::<Vec<_>>(),
+                        blocking_agents
+                    );
+                    HandlerDecision::Forward {
+                        targets: build_all_targets(&message.content),
+                    }
+                }
+            }
+            HandlerDecision::ResponseAndForward { content, targets } => {
+                // Check if all blocking agents are covered
+                let covered: std::collections::HashSet<_> =
+                    targets.iter().map(|t| t.agent.as_str()).collect();
+                let all_covered = blocking_agents.iter().all(|name| covered.contains(name.as_str()));
+
+                if all_covered {
+                    // All agents covered - keep LLM's version
+                    HandlerDecision::ResponseAndForward { content, targets }
+                } else {
+                    // Missing some agents - rebuild forward list
+                    info!(
+                        "[{}] 'all' routing: LLM only forwarded to {:?}, enforcing all {:?}",
+                        agent.name,
+                        covered.iter().collect::<Vec<_>>(),
+                        blocking_agents
+                    );
+                    // Keep the response part, but fix the forward targets
+                    HandlerDecision::ResponseAndForward {
+                        content,
+                        targets: build_all_targets(&message.content),
+                    }
+                }
+            }
+            HandlerDecision::None => {
+                // LLM returned nothing - forward to all agents
+                info!(
+                    "[{}] 'all' routing: LLM returned no decision, forwarding to all",
+                    agent.name
+                );
+                HandlerDecision::Forward {
+                    targets: build_all_targets(&message.content),
+                }
+            }
+        }
+    }
+
     /// Call the LLM provider
     async fn call_llm(&self, messages: &[LlmMessage]) -> Result<String, String> {
         let model = self.model.as_deref();
@@ -389,8 +520,17 @@ impl RoutingHandler for LlmHandler {
             Ok(content) => {
                 if self.routing_enabled {
                     // Parse JSON decision
-                    let decision = parse_llm_response(&content);
-                    debug!("[{}] Routing decision: {:?}", agent.name, decision);
+                    let mut decision = parse_llm_response(&content);
+                    debug!("[{}] Routing decision (before enforcement): {:?}", agent.name, decision);
+
+                    // Enforce "all" routing behavior at the system level
+                    // If routing_behavior is All, we MUST forward to ALL blocking connections
+                    // regardless of what the LLM decided
+                    if self.routing_behavior == RoutingBehavior::All {
+                        decision = self.enforce_all_routing(decision, message, agent);
+                        debug!("[{}] Routing decision (after 'all' enforcement): {:?}", agent.name, decision);
+                    }
+
                     decision
                 } else {
                     // Simple mode - just return as response
@@ -414,6 +554,22 @@ impl RoutingHandler for LlmHandler {
             return None;
         }
 
+        // Single response: pass through directly (no synthesis needed)
+        // Whether from a tool or agent, a single response is already complete
+        if forwarded_responses.len() == 1 {
+            let (responder_name, response) = &forwarded_responses[0];
+
+            // Try to unwrap JSON response format if present
+            let unwrapped = unwrap_json_response(response);
+
+            debug!(
+                "[{}] Single response pass-through from {} (skipping synthesis)",
+                agent.name, responder_name
+            );
+            return Some(unwrapped);
+        }
+
+        // Multiple responses: synthesize to combine them
         debug!(
             "[{}] Synthesizing {} forwarded responses",
             agent.name,
@@ -450,6 +606,7 @@ pub struct LlmHandlerBuilder {
     conversation_store: Option<Arc<RwLock<ConversationStore>>>,
     routing_enabled: bool,
     routing_behavior: RoutingBehavior,
+    tool_descriptions: std::collections::HashMap<String, String>,
 }
 
 impl LlmHandlerBuilder {
@@ -461,6 +618,7 @@ impl LlmHandlerBuilder {
             conversation_store: None,
             routing_enabled: false,
             routing_behavior: RoutingBehavior::default(),
+            tool_descriptions: std::collections::HashMap::new(),
         }
     }
 
@@ -498,6 +656,12 @@ impl LlmHandlerBuilder {
         self
     }
 
+    /// Set descriptions for connected tools
+    pub fn tool_descriptions(mut self, descriptions: std::collections::HashMap<String, String>) -> Self {
+        self.tool_descriptions = descriptions;
+        self
+    }
+
     pub fn build(self) -> LlmHandler {
         LlmHandler {
             provider: self.provider,
@@ -506,6 +670,202 @@ impl LlmHandlerBuilder {
             conversation_store: self.conversation_store,
             routing_enabled: self.routing_enabled,
             routing_behavior: self.routing_behavior,
+            tool_descriptions: self.tool_descriptions,
         }
+    }
+}
+
+/// Extract content from JSON response format if present
+/// e.g., {"response": "hello"} → "hello"
+/// If not JSON or no "response" field, returns original string
+fn unwrap_json_response(response: &str) -> String {
+    // Try to parse as JSON and extract "response" field
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(response) {
+        if let Some(content) = json.get("response").and_then(|v| v.as_str()) {
+            return content.to_string();
+        }
+    }
+    response.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentBuilder;
+    use crate::decision::ForwardTarget;
+    use crate::llm::provider::{CompletionResponse, LlmError};
+
+    // Mock provider for testing (doesn't need to work, just needs to exist)
+    struct MockProvider;
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn default_model(&self) -> &str {
+            "mock-model"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[LlmMessage],
+            _model: Option<&str>,
+            _options: Option<CompletionOptions>,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::ProviderError("Mock provider".to_string()))
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn create_test_handler_with_all_routing() -> LlmHandler {
+        LlmHandler::new(Arc::new(MockProvider))
+            .with_routing()
+            .with_routing_behavior(RoutingBehavior::All)
+    }
+
+    fn create_test_agent_with_connections() -> Agent {
+        AgentBuilder::new("Moderator")
+            .system_prompt("You moderate discussions.")
+            .blocking_connection("TechExpert")
+            .blocking_connection("BusinessExpert")
+            .notify_connection("Logger")
+            .build()
+    }
+
+    fn create_test_message() -> Message {
+        Message::new("user", "Moderator", "What should we do?")
+    }
+
+    #[test]
+    fn test_enforce_all_routing_converts_response_to_forward() {
+        let handler = create_test_handler_with_all_routing();
+        let agent = create_test_agent_with_connections();
+        let message = create_test_message();
+
+        // LLM returned a direct response when it should forward to all
+        let decision = HandlerDecision::Response {
+            content: "I think we should...".to_string(),
+        };
+
+        let enforced = handler.enforce_all_routing(decision, &message, &agent);
+
+        // Should be converted to Forward with both blocking connections
+        match enforced {
+            HandlerDecision::Forward { targets } => {
+                assert_eq!(targets.len(), 2);
+                let agent_names: std::collections::HashSet<_> =
+                    targets.iter().map(|t| t.agent.as_str()).collect();
+                assert!(agent_names.contains("TechExpert"));
+                assert!(agent_names.contains("BusinessExpert"));
+            }
+            _ => panic!("Expected Forward decision, got {:?}", enforced),
+        }
+    }
+
+    #[test]
+    fn test_enforce_all_routing_expands_partial_forward() {
+        let handler = create_test_handler_with_all_routing();
+        let agent = create_test_agent_with_connections();
+        let message = create_test_message();
+
+        // LLM only forwarded to one agent
+        let decision = HandlerDecision::Forward {
+            targets: vec![ForwardTarget::new("TechExpert", "What do you think?")],
+        };
+
+        let enforced = handler.enforce_all_routing(decision, &message, &agent);
+
+        // Should be expanded to include both blocking connections
+        match enforced {
+            HandlerDecision::Forward { targets } => {
+                assert_eq!(targets.len(), 2);
+                let agent_names: std::collections::HashSet<_> =
+                    targets.iter().map(|t| t.agent.as_str()).collect();
+                assert!(agent_names.contains("TechExpert"));
+                assert!(agent_names.contains("BusinessExpert"));
+            }
+            _ => panic!("Expected Forward decision, got {:?}", enforced),
+        }
+    }
+
+    #[test]
+    fn test_enforce_all_routing_keeps_complete_forward() {
+        let handler = create_test_handler_with_all_routing();
+        let agent = create_test_agent_with_connections();
+        let message = create_test_message();
+
+        // LLM correctly forwarded to all blocking connections
+        let decision = HandlerDecision::Forward {
+            targets: vec![
+                ForwardTarget::new("TechExpert", "Technical perspective?"),
+                ForwardTarget::new("BusinessExpert", "Business perspective?"),
+            ],
+        };
+
+        let enforced = handler.enforce_all_routing(decision.clone(), &message, &agent);
+
+        // Should keep the LLM's tailored messages since all agents are covered
+        match enforced {
+            HandlerDecision::Forward { targets } => {
+                assert_eq!(targets.len(), 2);
+                // Check that messages are preserved (LLM's tailored versions)
+                let tech_target = targets.iter().find(|t| t.agent == "TechExpert").unwrap();
+                assert_eq!(tech_target.message, "Technical perspective?");
+            }
+            _ => panic!("Expected Forward decision, got {:?}", enforced),
+        }
+    }
+
+    #[test]
+    fn test_enforce_all_routing_converts_none_to_forward() {
+        let handler = create_test_handler_with_all_routing();
+        let agent = create_test_agent_with_connections();
+        let message = create_test_message();
+
+        // LLM returned no decision
+        let decision = HandlerDecision::None;
+
+        let enforced = handler.enforce_all_routing(decision, &message, &agent);
+
+        // Should be converted to Forward with all blocking connections
+        match enforced {
+            HandlerDecision::Forward { targets } => {
+                assert_eq!(targets.len(), 2);
+            }
+            _ => panic!("Expected Forward decision, got {:?}", enforced),
+        }
+    }
+
+    #[test]
+    fn test_unwrap_json_response_extracts_content() {
+        // JSON with response field should be unwrapped
+        let json_response = r#"{"response": "hello world"}"#;
+        assert_eq!(super::unwrap_json_response(json_response), "hello world");
+    }
+
+    #[test]
+    fn test_unwrap_json_response_returns_plain_text() {
+        // Plain text should pass through unchanged
+        let plain_text = "hello world";
+        assert_eq!(super::unwrap_json_response(plain_text), "hello world");
+    }
+
+    #[test]
+    fn test_unwrap_json_response_handles_json_without_response_field() {
+        // JSON without "response" field should return original
+        let json_other = r#"{"data": "something else"}"#;
+        assert_eq!(super::unwrap_json_response(json_other), json_other);
+    }
+
+    #[test]
+    fn test_unwrap_json_response_handles_forward_to_json() {
+        // JSON with forward_to should return original (no response field)
+        let forward_json = r#"{"forward_to": [{"agent": "Worker", "message": "hello"}]}"#;
+        assert_eq!(super::unwrap_json_response(forward_json), forward_json);
     }
 }

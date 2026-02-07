@@ -1,0 +1,77 @@
+{
+  "system": { "global_timeout_secs": 60 },
+  "llm_providers": {
+    "default": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "default_model": "llama3.2"
+    }
+  },
+  "agents": [
+    {
+      "name": "Assistant",
+      "system_prompt": "You are a helpful assistant. You can use tools to search the web or echo messages back.",
+      "handler": {
+        "provider": "default",
+        "routing": true,
+        "routing_behavior": "best"
+      },
+      "connections": {
+        "WebSearch": { "type": "blocking", "timeout_secs": 30 },
+        "Echo": { "type": "blocking", "timeout_secs": 10 }
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "WebSearch",
+      "description": "Search the web for information on any topic",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "The search query" }
+        },
+        "required": ["query"]
+      },
+      "endpoint": {
+        "url": "https://httpbin.org/post",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body_template": {
+          "search": "${query}",
+          "source": "multi-agent-system"
+        }
+      },
+      "response_mapping": {
+        "extract_path": "$.json",
+        "format": "json"
+      },
+      "timeout_secs": 30
+    },
+    {
+      "name": "Echo",
+      "description": "Echo back the input message (for testing)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "Text to echo" }
+        },
+        "required": ["text"]
+      },
+      "endpoint": {
+        "url": "https://httpbin.org/post",
+        "method": "POST",
+        "body_template": {
+          "echo": "${text}"
+        }
+      },
+      "response_mapping": {
+        "extract_path": "$.json.echo",
+        "format": "text"
+      },
+      "timeout_secs": 10
+    }
+  ]
+}

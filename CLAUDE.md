@@ -51,7 +51,7 @@ cargo run -p mas-cli -- --config examples/basic_routing.json --prompt "Hello" -q
 
 ### Core Components (mas-core)
 
-- **Agent** (`agent.rs`): Entities with name, role, system_prompt, and connections
+- **Agent** (`agent.rs`): Entities with name, system_prompt, and connections
 - **Connection** (`connection.rs`): Blocking (wait for response) or Notify (fire-and-forget)
 - **Message** (`message.rs`): Communication unit with UUID, sender, receiver, content
 - **AgentSystem** (`agent_system.rs`): Orchestrates message routing and parallel execution
@@ -89,7 +89,6 @@ The system can be configured via JSON files. See `examples/` for full examples.
   "agents": [
     {
       "name": "Coordinator",
-      "role": "Routes requests",
       "system_prompt": "You coordinate work.",
       "handler": {
         "provider": "default",

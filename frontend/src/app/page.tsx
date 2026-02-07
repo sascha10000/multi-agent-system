@@ -20,18 +20,28 @@ import '@xyflow/react/dist/style.css';
 
 import AgentNode from '../components/AgentNode';
 import AgentModal from '../components/AgentModal';
+import ToolNode from '../components/ToolNode';
+import ToolModal from '../components/ToolModal';
 import ChatPanel from '../components/ChatPanel';
-import type { AgentNodeData, SystemConfigJson, AgentConfig, RoutingBehavior } from '../types/agent';
+import type {
+  AgentNodeData,
+  ToolNodeData,
+  SystemConfigJson,
+  AgentConfig,
+  ToolConfig,
+  RoutingBehavior,
+  EndpointType,
+} from '../types/agent';
 
-// Initial nodes for demo
-const initialNodes: Node<AgentNodeData>[] = [
+// Initial nodes for demo - includes an MCP tool example
+const initialNodes: Node<AgentNodeData | ToolNodeData>[] = [
   {
     id: '1',
     type: 'agent',
     position: { x: 250, y: 50 },
     data: {
-      name: 'Coordinator',
-      systemPrompt: 'You coordinate work between team members.',
+      name: 'Assistant',
+      systemPrompt: 'You are a helpful assistant. When users ask about jobs, use the JobSearch tool to find relevant listings. Format the results in a clear, readable way.',
       provider: 'default',
       model: 'llama3.2',
       routing: true,
@@ -42,17 +52,21 @@ const initialNodes: Node<AgentNodeData>[] = [
   },
   {
     id: '2',
-    type: 'agent',
+    type: 'tool',
     position: { x: 100, y: 250 },
     data: {
-      name: 'Researcher',
-      systemPrompt: 'You are an expert researcher.',
-      provider: 'default',
-      model: 'llama3.2',
-      routing: false,
-      routingBehavior: 'best',
-      temperature: 0.7,
-      maxTokens: 2000,
+      name: 'JobSearch',
+      description: 'Search for job listings. Can search by keywords, location, and job type.',
+      endpointType: 'mcp',
+      endpointUrl: 'https://joblyst.sascha10k.biz/mcp',
+      endpointMethod: 'POST',
+      mcpToolName: 'search_jobs',
+      headers: {},
+      bodyTemplate: '',
+      parameters: '{\n  "type": "object",\n  "properties": {\n    "query": {\n      "type": "string",\n      "description": "Search keywords (e.g., software engineer, data scientist)"\n    },\n    "location": {\n      "type": "string",\n      "description": "Job location (e.g., Berlin, Remote)"\n    }\n  },\n  "required": ["query"]\n}',
+      extractPath: '',
+      responseFormat: 'json',
+      timeoutSecs: 30,
     },
   },
   {
@@ -81,8 +95,9 @@ export default function EditorPage() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-  // Modal state
-  const [modalOpen, setModalOpen] = useState(false);
+  // Modal state - separate for agents and tools
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [toolModalOpen, setToolModalOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Chat panel state
@@ -93,25 +108,42 @@ export default function EditorPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Node types configuration - memoized to prevent re-renders
-  const nodeTypes: NodeTypes = useMemo(() => ({ agent: AgentNode }), []);
+  const nodeTypes: NodeTypes = useMemo(() => ({
+    agent: AgentNode,
+    tool: ToolNode,
+  }), []);
 
-  // Get selected node data
+  // Get selected node
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
-  const selectedAgentData = selectedNode?.data || null;
+  const selectedAgentData = selectedNode?.type === 'agent' ? selectedNode.data as AgentNodeData : null;
+  const selectedToolData = selectedNode?.type === 'tool' ? selectedNode.data as ToolNodeData : null;
 
-  // Handle new connections
+  // Handle new connections with validation
   const onConnect = useCallback(
     (connection: Connection) => {
+      // Find the source node
+      const sourceNode = nodes.find((n) => n.id === connection.source);
+
+      // Tools cannot be sources (they don't initiate connections)
+      if (sourceNode?.type === 'tool') {
+        console.warn('Tools cannot initiate connections');
+        return;
+      }
+
       setEdges((eds) => addEdge({ ...connection, animated: true }, eds));
     },
-    [setEdges]
+    [nodes, setEdges]
   );
 
   // Handle node double-click to edit
   const onNodeDoubleClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
       setSelectedNodeId(node.id);
-      setModalOpen(true);
+      if (node.type === 'tool') {
+        setToolModalOpen(true);
+      } else {
+        setAgentModalOpen(true);
+      }
     },
     []
   );
@@ -138,9 +170,38 @@ export default function EditorPage() {
       },
     };
     setNodes((nds) => [...nds, newNode]);
-    // Open modal for the new node
     setSelectedNodeId(newId);
-    setModalOpen(true);
+    setAgentModalOpen(true);
+  }, [setNodes]);
+
+  // Add new tool (MCP by default as it's simpler to configure)
+  const addTool = useCallback(() => {
+    const newId = `tool-${Date.now()}`;
+    const newNode: Node<ToolNodeData> = {
+      id: newId,
+      type: 'tool',
+      position: {
+        x: Math.random() * 300 + 100,
+        y: Math.random() * 200 + 100,
+      },
+      data: {
+        name: 'New Tool',
+        description: 'An MCP tool',
+        endpointType: 'mcp',
+        endpointUrl: 'https://example.com/mcp',
+        endpointMethod: 'POST',
+        mcpToolName: 'tool_name',
+        headers: {},
+        bodyTemplate: '',
+        parameters: '{\n  "type": "object",\n  "properties": {\n    "query": { "type": "string", "description": "The query parameter" }\n  },\n  "required": ["query"]\n}',
+        extractPath: '',
+        responseFormat: 'json',
+        timeoutSecs: 30,
+      },
+    };
+    setNodes((nds) => [...nds, newNode]);
+    setSelectedNodeId(newId);
+    setToolModalOpen(true);
   }, [setNodes]);
 
   // Save agent changes
@@ -154,14 +215,31 @@ export default function EditorPage() {
             : node
         )
       );
-      setModalOpen(false);
+      setAgentModalOpen(false);
       setSelectedNodeId(null);
     },
     [selectedNodeId, setNodes]
   );
 
-  // Delete agent
-  const handleDeleteAgent = useCallback(() => {
+  // Save tool changes
+  const handleSaveTool = useCallback(
+    (data: ToolNodeData) => {
+      if (!selectedNodeId) return;
+      setNodes((nds) =>
+        nds.map((node) =>
+          node.id === selectedNodeId
+            ? { ...node, data: { ...data } }
+            : node
+        )
+      );
+      setToolModalOpen(false);
+      setSelectedNodeId(null);
+    },
+    [selectedNodeId, setNodes]
+  );
+
+  // Delete node (agent or tool)
+  const handleDeleteNode = useCallback(() => {
     if (!selectedNodeId) return;
     setNodes((nds) => nds.filter((node) => node.id !== selectedNodeId));
     setEdges((eds) =>
@@ -169,14 +247,26 @@ export default function EditorPage() {
         (edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId
       )
     );
-    setModalOpen(false);
+    setAgentModalOpen(false);
+    setToolModalOpen(false);
     setSelectedNodeId(null);
   }, [selectedNodeId, setNodes, setEdges]);
 
   // Export to API format
   const exportConfig = useCallback((): SystemConfigJson => {
-    const agents: AgentConfig[] = nodes.map((node) => {
-      const data = node.data;
+    // Separate agents and tools
+    const agentNodes = nodes.filter((n) => n.type === 'agent');
+    const toolNodes = nodes.filter((n) => n.type === 'tool');
+
+    // Create name-to-id mapping for all nodes
+    const nameToId: Record<string, string> = {};
+    nodes.forEach((node) => {
+      nameToId[node.data.name as string] = node.id;
+    });
+
+    // Convert agent nodes to AgentConfig
+    const agents: AgentConfig[] = agentNodes.map((node) => {
+      const data = node.data as AgentNodeData;
       const connections: Record<string, { type: 'blocking' | 'notify'; timeout_secs?: number }> = {};
 
       // Find all edges where this node is the source
@@ -185,7 +275,7 @@ export default function EditorPage() {
         .forEach((edge) => {
           const targetNode = nodes.find((n) => n.id === edge.target);
           if (targetNode) {
-            connections[targetNode.data.name] = {
+            connections[targetNode.data.name as string] = {
               type: 'blocking',
               timeout_secs: 60,
             };
@@ -209,6 +299,53 @@ export default function EditorPage() {
       };
     });
 
+    // Convert tool nodes to ToolConfig
+    const tools: ToolConfig[] = toolNodes.map((node) => {
+      const data = node.data as ToolNodeData;
+
+      // Parse JSON strings back to objects
+      let parameters: Record<string, unknown> = {};
+      let bodyTemplate: Record<string, unknown> | undefined;
+
+      try {
+        if (data.parameters) {
+          parameters = JSON.parse(data.parameters);
+        }
+      } catch {
+        console.warn('Failed to parse parameters JSON for tool:', data.name);
+      }
+
+      // Only parse body template for HTTP endpoints
+      if (data.endpointType !== 'mcp') {
+        try {
+          if (data.bodyTemplate) {
+            bodyTemplate = JSON.parse(data.bodyTemplate);
+          }
+        } catch {
+          console.warn('Failed to parse body template JSON for tool:', data.name);
+        }
+      }
+
+      return {
+        name: data.name,
+        description: data.description,
+        parameters,
+        endpoint: {
+          url: data.endpointUrl,
+          type: data.endpointType || 'http',
+          method: data.endpointMethod,
+          headers: Object.keys(data.headers).length > 0 ? data.headers : undefined,
+          body_template: data.endpointType !== 'mcp' ? bodyTemplate : undefined,
+          mcp_tool_name: data.endpointType === 'mcp' ? data.mcpToolName : undefined,
+        },
+        response_mapping: {
+          extract_path: data.extractPath || undefined,
+          format: data.responseFormat,
+        },
+        timeout_secs: data.timeoutSecs,
+      };
+    });
+
     return {
       system: { global_timeout_secs: 60 },
       llm_providers: {
@@ -219,6 +356,7 @@ export default function EditorPage() {
         },
       },
       agents,
+      tools: tools.length > 0 ? tools : undefined,
     };
   }, [nodes, edges]);
 
@@ -251,21 +389,25 @@ export default function EditorPage() {
           return;
         }
 
-        // Create a map from agent name to node ID
-        const agentNameToId: Record<string, string> = {};
+        // Create a map from name to node ID (for both agents and tools)
+        const nameToId: Record<string, string> = {};
 
-        // Calculate grid positions for agents
-        const cols = Math.ceil(Math.sqrt(config.agents.length));
+        // Calculate grid positions
+        const totalItems = config.agents.length + (config.tools?.length || 0);
+        const cols = Math.ceil(Math.sqrt(totalItems));
         const spacingX = 250;
         const spacingY = 200;
 
-        // Convert agents to nodes
-        const newNodes: Node<AgentNodeData>[] = config.agents.map((agent, index) => {
-          const nodeId = `imported-${Date.now()}-${index}`;
-          agentNameToId[agent.name] = nodeId;
+        let itemIndex = 0;
 
-          const row = Math.floor(index / cols);
-          const col = index % cols;
+        // Convert agents to nodes
+        const agentNodes: Node<AgentNodeData>[] = config.agents.map((agent) => {
+          const nodeId = `imported-agent-${Date.now()}-${itemIndex}`;
+          nameToId[agent.name] = nodeId;
+
+          const row = Math.floor(itemIndex / cols);
+          const col = itemIndex % cols;
+          itemIndex++;
 
           return {
             id: nodeId,
@@ -287,13 +429,56 @@ export default function EditorPage() {
           };
         });
 
+        // Convert tools to nodes
+        const toolNodes: Node<ToolNodeData>[] = (config.tools || []).map((tool) => {
+          const nodeId = `imported-tool-${Date.now()}-${itemIndex}`;
+          nameToId[tool.name] = nodeId;
+
+          const row = Math.floor(itemIndex / cols);
+          const col = itemIndex % cols;
+          itemIndex++;
+
+          // Determine endpoint type from config
+          const endpointType = tool.endpoint.type || (tool.endpoint.mcp_tool_name ? 'mcp' : 'http');
+
+          return {
+            id: nodeId,
+            type: 'tool',
+            position: {
+              x: 100 + col * spacingX,
+              y: 50 + row * spacingY,
+            },
+            data: {
+              name: tool.name,
+              description: tool.description,
+              endpointType: endpointType,
+              endpointUrl: tool.endpoint.url,
+              endpointMethod: tool.endpoint.method || 'POST',
+              mcpToolName: tool.endpoint.mcp_tool_name || '',
+              headers: tool.endpoint.headers || {},
+              bodyTemplate: tool.endpoint.body_template
+                ? JSON.stringify(tool.endpoint.body_template, null, 2)
+                : '',
+              parameters: tool.parameters
+                ? JSON.stringify(tool.parameters, null, 2)
+                : '{\n  "type": "object",\n  "properties": {}\n}',
+              extractPath: tool.response_mapping?.extract_path || '',
+              responseFormat: tool.response_mapping?.format || 'json',
+              timeoutSecs: tool.timeout_secs || 30,
+            },
+          };
+        });
+
+        // Combine all nodes
+        const newNodes = [...agentNodes, ...toolNodes];
+
         // Convert connections to edges
         const newEdges: Edge[] = [];
         config.agents.forEach((agent) => {
           if (agent.connections) {
-            const sourceId = agentNameToId[agent.name];
+            const sourceId = nameToId[agent.name];
             Object.keys(agent.connections).forEach((targetName) => {
-              const targetId = agentNameToId[targetName];
+              const targetId = nameToId[targetName];
               if (sourceId && targetId) {
                 newEdges.push({
                   id: `e-${sourceId}-${targetId}`,
@@ -315,7 +500,7 @@ export default function EditorPage() {
         setSystemName(baseName);
 
         console.log('Imported configuration:', config);
-        alert(`Imported ${newNodes.length} agents and ${newEdges.length} connections`);
+        alert(`Imported ${agentNodes.length} agents, ${toolNodes.length} tools, and ${newEdges.length} connections`);
       } catch (error) {
         console.error('Failed to parse JSON:', error);
         alert('Failed to parse JSON file. Please ensure it is valid JSON.');
@@ -349,8 +534,9 @@ export default function EditorPage() {
         <Controls />
         <MiniMap
           nodeColor={(node) => {
-            if (node.data?.routing) return '#a855f7';
-            return '#3b82f6';
+            if (node.type === 'tool') return '#f59e0b'; // amber for tools
+            if ((node.data as AgentNodeData)?.routing) return '#a855f7'; // purple for routing agents
+            return '#3b82f6'; // blue for regular agents
           }}
           maskColor="rgba(0, 0, 0, 0.1)"
         />
@@ -376,8 +562,23 @@ export default function EditorPage() {
             Add Agent
           </button>
           <button
+            onClick={addTool}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-sm font-medium rounded-lg shadow-md hover:bg-amber-600 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+              />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            Add Tool
+          </button>
+          <button
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-amber-700 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-zinc-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-zinc-700 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m4-8l-4 4m0 0l-4-4m4 4V4" />
@@ -410,14 +611,26 @@ export default function EditorPage() {
         </Panel>
       </ReactFlow>
 
-      {/* Edit Modal */}
+      {/* Agent Edit Modal */}
       <AgentModal
-        isOpen={modalOpen}
+        isOpen={agentModalOpen}
         agent={selectedAgentData}
         onSave={handleSaveAgent}
-        onDelete={handleDeleteAgent}
+        onDelete={handleDeleteNode}
         onClose={() => {
-          setModalOpen(false);
+          setAgentModalOpen(false);
+          setSelectedNodeId(null);
+        }}
+      />
+
+      {/* Tool Edit Modal */}
+      <ToolModal
+        isOpen={toolModalOpen}
+        tool={selectedToolData}
+        onSave={handleSaveTool}
+        onDelete={handleDeleteNode}
+        onClose={() => {
+          setToolModalOpen(false);
           setSelectedNodeId(null);
         }}
       />

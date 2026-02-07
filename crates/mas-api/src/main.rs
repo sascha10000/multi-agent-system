@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Multi-Agent System API server on {}", addr);
     info!("API available at http://{}/api/v1/", addr);
     info!("Session data stored in data/sessions/");
+    info!("System configs stored in data/systems/");
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;

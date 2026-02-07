@@ -5,6 +5,7 @@ use crate::conversation::ConversationStore;
 use crate::decision::{ForwardTarget, HandlerDecision};
 use crate::errors::{AgentError, Result};
 use crate::message::Message;
+use crate::tool::Tool;
 use crate::tracer::{TraceCollector, TraceEvent};
 
 use async_trait::async_trait;
@@ -103,6 +104,12 @@ struct RunningAgent {
     inbox_tx: mpsc::Sender<InboxMessage>,
 }
 
+/// Handle to a running tool
+struct RunningTool {
+    tool: Arc<Tool>,
+    inbox_tx: mpsc::Sender<InboxMessage>,
+}
+
 /// Type of handler registered for an agent
 #[allow(dead_code)]
 enum HandlerType {
@@ -110,10 +117,18 @@ enum HandlerType {
     Routing(Arc<dyn RoutingHandler>),
 }
 
+/// Information about a registered tool (for routing prompts)
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+}
+
 /// The multi-agent system orchestrator
 pub struct AgentSystem {
     config: SystemConfig,
     agents: RwLock<HashMap<String, RunningAgent>>,
+    tools: RwLock<HashMap<String, RunningTool>>,
     conversations: RwLock<ConversationStore>,
     handlers: RwLock<HashMap<String, HandlerType>>,
 }
@@ -123,6 +138,7 @@ impl AgentSystem {
         Self {
             config,
             agents: RwLock::new(HashMap::new()),
+            tools: RwLock::new(HashMap::new()),
             conversations: RwLock::new(ConversationStore::new()),
             handlers: RwLock::new(HashMap::new()),
         }
@@ -210,6 +226,53 @@ impl AgentSystem {
         Ok(())
     }
 
+    /// Register a tool with its handler
+    ///
+    /// Tools are HTTP-based endpoints that agents can forward messages to.
+    /// They behave like simple agents but execute HTTP requests instead of LLM calls.
+    pub async fn register_tool(
+        &self,
+        tool: Arc<Tool>,
+        handler: Arc<dyn MessageHandler>,
+    ) -> Result<()> {
+        let name = tool.name().to_string();
+        let (inbox_tx, inbox_rx) = mpsc::channel::<InboxMessage>(100);
+
+        // Spawn the tool's message processing loop
+        let tool_clone = tool.clone();
+        let handler_clone = handler;
+        tokio::spawn(async move {
+            Self::tool_loop(tool_clone, inbox_rx, handler_clone).await;
+        });
+
+        // Store the running tool
+        {
+            let mut tools = self.tools.write().await;
+            tools.insert(
+                name.clone(),
+                RunningTool {
+                    tool,
+                    inbox_tx,
+                },
+            );
+        }
+
+        info!("Registered tool: {}", name);
+        Ok(())
+    }
+
+    /// Get info about all registered tools (for LLM routing prompts)
+    pub async fn get_tool_infos(&self) -> Vec<ToolInfo> {
+        let tools = self.tools.read().await;
+        tools
+            .values()
+            .map(|rt| ToolInfo {
+                name: rt.tool.name().to_string(),
+                description: rt.tool.description().to_string(),
+            })
+            .collect()
+    }
+
     /// Simple agent loop for MessageHandler (no routing)
     async fn simple_agent_loop(
         agent: Agent,
@@ -218,6 +281,39 @@ impl AgentSystem {
     ) {
         while let Some(inbox_msg) = inbox.recv().await {
             let response_content = handler.handle(&inbox_msg.message, &agent).await;
+
+            // If there's a response channel and we have content, send the response
+            if let (Some(tx), Some(content)) = (inbox_msg.response_tx, response_content) {
+                let response = inbox_msg.message.reply(content);
+                let _ = tx.send(response);
+            }
+        }
+    }
+
+    /// Tool processing loop
+    ///
+    /// Similar to simple_agent_loop but for tools. Uses a dummy Agent for the handler.
+    async fn tool_loop(
+        tool: Arc<Tool>,
+        mut inbox: mpsc::Receiver<InboxMessage>,
+        handler: Arc<dyn MessageHandler>,
+    ) {
+        // Create a minimal dummy agent for the handler interface
+        let dummy_agent = Agent {
+            name: tool.name().to_string(),
+            system_prompt: tool.description().to_string(),
+            connections: HashMap::new(),
+        };
+
+        while let Some(inbox_msg) = inbox.recv().await {
+            debug!(
+                "[Tool:{}] Processing message from {}: {}",
+                tool.name(),
+                inbox_msg.message.from,
+                &inbox_msg.message.content[..inbox_msg.message.content.len().min(100)]
+            );
+
+            let response_content = handler.handle(&inbox_msg.message, &dummy_agent).await;
 
             // If there's a response channel and we have content, send the response
             if let (Some(tx), Some(content)) = (inbox_msg.response_tx, response_content) {
@@ -418,6 +514,7 @@ impl AgentSystem {
 
     /// Internal send method that doesn't require an explicit connection
     /// Used for forwarding where the routing handler decides the target
+    /// Can send to both agents and tools
     async fn send_message_internal(
         &self,
         from: &str,
@@ -425,6 +522,7 @@ impl AgentSystem {
         content: &str,
     ) -> Result<SendResult> {
         let agents = self.agents.read().await;
+        let tools = self.tools.read().await;
 
         // Get sender agent
         let sender = agents
@@ -433,11 +531,6 @@ impl AgentSystem {
 
         // Check if there's an explicit connection
         let connection = sender.agent.get_connection(to);
-
-        // Get receiver
-        let receiver = agents
-            .get(to)
-            .ok_or_else(|| AgentError::AgentNotFound(to.to_string()))?;
 
         // Create the message
         let message = Message::new(from, to, content);
@@ -458,6 +551,15 @@ impl AgentSystem {
             None => (false, self.config.global_timeout),
         };
 
+        // Get receiver inbox - check agents first, then tools
+        let receiver_inbox = if let Some(agent) = agents.get(to) {
+            agent.inbox_tx.clone()
+        } else if let Some(tool) = tools.get(to) {
+            tool.inbox_tx.clone()
+        } else {
+            return Err(AgentError::AgentNotFound(to.to_string()));
+        };
+
         if is_notify {
             // Fire and forget
             let inbox_msg = InboxMessage {
@@ -465,11 +567,10 @@ impl AgentSystem {
                 response_tx: None,
                 trace: None,
             };
-            receiver
-                .inbox_tx
+            receiver_inbox
                 .send(inbox_msg)
                 .await
-                .map_err(|_| AgentError::ChannelError("Failed to send to agent inbox".into()))?;
+                .map_err(|_| AgentError::ChannelError("Failed to send to inbox".into()))?;
             Ok(SendResult::Notified)
         } else {
             // Blocking with response
@@ -480,11 +581,10 @@ impl AgentSystem {
                 trace: None,
             };
 
-            receiver
-                .inbox_tx
+            receiver_inbox
                 .send(inbox_msg)
                 .await
-                .map_err(|_| AgentError::ChannelError("Failed to send to agent inbox".into()))?;
+                .map_err(|_| AgentError::ChannelError("Failed to send to inbox".into()))?;
 
             match timeout(effective_timeout, response_rx).await {
                 Ok(Ok(response)) => {
@@ -827,12 +927,9 @@ mod tests {
     async fn test_blocking_send_receive() {
         let system = AgentSystem::with_default_config();
 
-        let agent_a = AgentBuilder::new("A")
-            .role("Sender")
-            .blocking_connection("B")
-            .build();
+        let agent_a = AgentBuilder::new("A").blocking_connection("B").build();
 
-        let agent_b = AgentBuilder::new("B").role("Receiver").build();
+        let agent_b = AgentBuilder::new("B").build();
 
         system
             .register_agent(agent_a, Arc::new(EchoHandler))
@@ -859,12 +956,9 @@ mod tests {
     async fn test_notify_send() {
         let system = AgentSystem::with_default_config();
 
-        let agent_a = AgentBuilder::new("A")
-            .role("Sender")
-            .notify_connection("Logger")
-            .build();
+        let agent_a = AgentBuilder::new("A").notify_connection("Logger").build();
 
-        let agent_logger = AgentBuilder::new("Logger").role("Sink").build();
+        let agent_logger = AgentBuilder::new("Logger").build();
 
         let received = Arc::new(RwLock::new(false));
         let received_clone = received.clone();
@@ -894,12 +988,9 @@ mod tests {
         let config = SystemConfig::with_timeout_secs(1);
         let system = AgentSystem::new(config);
 
-        let agent_a = AgentBuilder::new("A")
-            .role("Sender")
-            .blocking_connection("Slow")
-            .build();
+        let agent_a = AgentBuilder::new("A").blocking_connection("Slow").build();
 
-        let agent_slow = AgentBuilder::new("Slow").role("Slow responder").build();
+        let agent_slow = AgentBuilder::new("Slow").build();
 
         system
             .register_agent(agent_a, Arc::new(EchoHandler))
@@ -928,15 +1019,14 @@ mod tests {
         let system = AgentSystem::with_default_config();
 
         let coordinator = AgentBuilder::new("Coordinator")
-            .role("Orchestrator")
             .blocking_connection("Worker1")
             .blocking_connection("Worker2")
             .notify_connection("Logger")
             .build();
 
-        let worker1 = AgentBuilder::new("Worker1").role("Worker").build();
-        let worker2 = AgentBuilder::new("Worker2").role("Worker").build();
-        let logger = AgentBuilder::new("Logger").role("Logger").build();
+        let worker1 = AgentBuilder::new("Worker1").build();
+        let worker2 = AgentBuilder::new("Worker2").build();
+        let logger = AgentBuilder::new("Logger").build();
 
         system
             .register_agent(coordinator, Arc::new(EchoHandler))
@@ -980,8 +1070,8 @@ mod tests {
     async fn test_no_connection_error() {
         let system = AgentSystem::with_default_config();
 
-        let agent_a = AgentBuilder::new("A").role("Sender").build();
-        let agent_b = AgentBuilder::new("B").role("Receiver").build();
+        let agent_a = AgentBuilder::new("A").build();
+        let agent_b = AgentBuilder::new("B").build();
 
         system
             .register_agent(agent_a, Arc::new(EchoHandler))

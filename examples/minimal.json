@@ -8,7 +8,6 @@
   "agents": [
     {
       "name": "Assistant",
-      "role": "General assistant",
       "system_prompt": "You are a helpful assistant. Answer questions concisely.",
       "handler": {
         "provider": "default"
