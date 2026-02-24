@@ -416,6 +416,14 @@ impl AppState {
         systems.contains_key(name)
     }
 
+    /// Get the full system config by name
+    pub async fn get_system_config(&self, name: &str) -> Option<(SystemConfigJson, DateTime<Utc>)> {
+        let systems = self.systems.read().await;
+        systems
+            .get(name)
+            .map(|e| (e.config.clone(), e.created_at))
+    }
+
     /// Check if an agent exists in a system
     pub async fn agent_exists(&self, system_name: &str, agent_name: &str) -> bool {
         let systems = self.systems.read().await;

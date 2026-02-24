@@ -14,6 +14,8 @@
 //!
 //! For MCP (Model Context Protocol) endpoints, the handler uses the `rmcp` SDK
 //! to manage the protocol lifecycle (initialize, call tool, etc.)
+//! The MCP client is created lazily on the first call and reused for subsequent
+//! calls, avoiding the overhead of reconnecting for every request.
 
 use crate::agent::Agent;
 use crate::agent_system::MessageHandler;
@@ -23,23 +25,30 @@ use crate::tool::{EndpointType, HttpMethod, ResponseFormat, Tool};
 use async_trait::async_trait;
 use reqwest::Client;
 use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion};
+use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
+use rmcp::{RoleClient, ServiceExt};
 use std::borrow::Cow;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 /// Default timeout for tool HTTP requests (30 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+/// Cached MCP client connection
+type McpClient = RunningService<RoleClient, ClientInfo>;
+
 /// Handler that executes HTTP requests for a tool
 pub struct ToolHandler {
     tool: Arc<Tool>,
     client: Client,
+    /// Cached MCP client — lazily initialized on first MCP call, reused across calls.
+    mcp_client: Mutex<Option<McpClient>>,
 }
 
 impl ToolHandler {
@@ -55,7 +64,11 @@ impl ToolHandler {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { tool, client }
+        Self {
+            tool,
+            client,
+            mcp_client: Mutex::new(None),
+        }
     }
 
     /// Parse parameters from message content, preserving JSON types
@@ -313,27 +326,24 @@ impl ToolHandler {
         Ok(self.format_response(&extracted))
     }
 
-    /// Execute an MCP (Model Context Protocol) request using the rmcp SDK
-    ///
-    /// The rmcp SDK handles the full MCP lifecycle:
-    /// 1. Connects to the MCP server via HTTP transport
-    /// 2. Initializes the session
-    /// 3. Calls the specified tool with arguments
-    /// 4. Returns the result
-    async fn execute_mcp_request(&self, params: &HashMap<String, Value>) -> Result<String, String> {
-        let endpoint = &self.tool.config.endpoint;
-        // Convert to strings only for URL substitution
-        let string_params = self.params_to_strings(params);
-        let url = self.substitute_placeholders(&endpoint.url, &string_params);
+    /// Get or create a cached MCP client connection.
+    /// Returns the lock guard so the caller can use the client.
+    async fn get_or_create_mcp_client(&self, url: &str) -> Result<(), String> {
+        let mut guard = self.mcp_client.lock().await;
 
-        // Get the MCP tool name
-        let mcp_tool_name = endpoint.mcp_tool_name.as_ref().ok_or_else(|| {
-            "MCP endpoint requires mcp_tool_name to be set".to_string()
-        })?;
+        // Check if existing client is still alive
+        if let Some(ref client) = *guard {
+            if !client.is_transport_closed() {
+                debug!("[{}] Reusing cached MCP client", self.tool.name());
+                return Ok(());
+            }
+            info!("[{}] MCP client disconnected, reconnecting...", self.tool.name());
+            // Drop the stale client
+            *guard = None;
+        }
 
-        info!("[{}] Making MCP request to: {} (tool: {})", self.tool.name(), url, mcp_tool_name);
+        info!("[{}] Connecting to MCP server: {}", self.tool.name(), url);
 
-        // Create the MCP client info
         let client_info = ClientInfo {
             meta: None,
             protocol_version: ProtocolVersion::default(),
@@ -347,15 +357,34 @@ impl ToolHandler {
             },
         };
 
-        // Create the HTTP transport
         let transport = StreamableHttpClientTransport::from_uri(url);
-
-        // Connect and initialize the client
-        debug!("[{}] Connecting to MCP server", self.tool.name());
         let client = client_info.serve(transport).await.map_err(|e| {
             error!("[{}] Failed to initialize MCP client: {}", self.tool.name(), e);
             format!("Failed to initialize MCP client: {}", e)
         })?;
+
+        info!("[{}] MCP client connected", self.tool.name());
+        *guard = Some(client);
+        Ok(())
+    }
+
+    /// Execute an MCP (Model Context Protocol) request using a cached client
+    ///
+    /// The MCP client is created once and reused across calls. If the connection
+    /// is lost, it reconnects automatically.
+    async fn execute_mcp_request(&self, params: &HashMap<String, Value>) -> Result<String, String> {
+        let endpoint = &self.tool.config.endpoint;
+        let string_params = self.params_to_strings(params);
+        let url = self.substitute_placeholders(&endpoint.url, &string_params);
+
+        let mcp_tool_name = endpoint.mcp_tool_name.as_ref().ok_or_else(|| {
+            "MCP endpoint requires mcp_tool_name to be set".to_string()
+        })?;
+
+        info!("[{}] MCP call: {} (tool: {})", self.tool.name(), url, mcp_tool_name);
+
+        // Ensure we have a connected MCP client
+        self.get_or_create_mcp_client(&url).await?;
 
         // Build the tool arguments from typed params (preserves JSON types)
         let arguments: Option<serde_json::Map<String, Value>> = Some(
@@ -369,20 +398,26 @@ impl ToolHandler {
             serde_json::to_string(&arguments).unwrap_or_default()
         );
 
-        // Call the tool
-        debug!("[{}] Calling MCP tool '{}'", self.tool.name(), mcp_tool_name);
-        let tool_result = client
-            .call_tool(CallToolRequestParams {
-                meta: None,
-                name: Cow::Owned(mcp_tool_name.clone()),
-                arguments,
-                task: None,
-            })
-            .await
-            .map_err(|e| {
-                error!("[{}] MCP tool call failed: {}", self.tool.name(), e);
-                format!("MCP tool call failed: {}", e)
+        // Call the tool using the cached client
+        let tool_result = {
+            let guard = self.mcp_client.lock().await;
+            let client = guard.as_ref().ok_or_else(|| {
+                "MCP client not available".to_string()
             })?;
+
+            client
+                .call_tool(CallToolRequestParams {
+                    meta: None,
+                    name: Cow::Owned(mcp_tool_name.clone()),
+                    arguments,
+                    task: None,
+                })
+                .await
+                .map_err(|e| {
+                    error!("[{}] MCP tool call failed: {}", self.tool.name(), e);
+                    format!("MCP tool call failed: {}", e)
+                })?
+        };
 
         info!("[{}] MCP tool call succeeded", self.tool.name());
 

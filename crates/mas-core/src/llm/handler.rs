@@ -201,44 +201,48 @@ Prefer answering directly. Only include valid JSON in your response."#,
             }
             RoutingBehavior::Best => {
                 // Check if we have any tools
-                let has_tools = self.tool_descriptions.values().any(|_| true);
+                let has_tools = !self.tool_descriptions.is_empty();
                 let tool_instructions = if has_tools {
-                    r#"
+                    // Build concrete examples for each tool so the LLM knows the exact parameter format
+                    let mut examples = String::new();
+                    for (name, _desc) in &self.tool_descriptions {
+                        examples.push_str(&format!(
+                            "\nTo use {name}: {{ \"forward_to\": [{{ \"agent\": \"{name}\", \"message\": \"{{\\\"query\\\": \\\"search terms\\\"}}\" }}] }}",
+                        ));
+                    }
+                    format!(
+                        r#"
 
-TOOL USAGE: When forwarding to a Tool, the message MUST be valid JSON with the tool's parameters.
-For example, to call a search tool: { "forward_to": [{ "agent": "JobSearch", "message": "{\"query\": \"software engineer\"}" }] }
-The message field must be a JSON string containing the parameters the tool expects."#
+TOOL USAGE: When forwarding to a Tool, the message MUST be a JSON string with the tool's parameters.{examples}"#
+                    )
                 } else {
-                    ""
+                    String::new()
                 };
 
                 format!(
                     r#"
-You can either:
-1. Respond directly to the sender
-2. Forward the request to the BEST matching agent or tool
-3. Both respond AND forward (acknowledge + delegate)
+
+YOU ARE A ROUTER. You MUST output ONLY a single JSON object. No explanations, no text, no markdown — ONLY JSON.
+
+If an available tool or agent matches the user's request, you MUST forward to it. Only respond directly if NOTHING matches.
 
 Available agents/tools you can forward to:
 {}
-IMPORTANT: Choose the agent/tool that BEST MATCHES the question topic.{}
+{tool_instructions}
 
-Respond with JSON in one of these formats:
+JSON formats — pick ONE:
 
-Direct response (only if no agent/tool matches the topic):
-{{ "response": "your response here" }}
+Forward to tool/agent:
+{{ "forward_to": [{{ "agent": "NAME", "message": "the question or JSON params" }}] }}
 
-Forward to the best agent/tool:
-{{ "forward_to": [{{ "agent": "AgentName", "message": "the question or JSON parameters" }}] }}
+Direct response (ONLY if nothing above matches):
+{{ "response": "your answer" }}
 
-Both respond and forward:
-{{
-  "response": "I'll check with our specialist.",
-  "forward_to": [{{ "agent": "AgentName", "message": "the question or JSON parameters" }}]
-}}
-
-Only include valid JSON in your response."#,
-                    agent_list, tool_instructions
+RULES:
+- Output ONLY valid JSON. No other text.
+- If the user's request relates to any available tool, you MUST forward to it.
+- Never answer a question yourself if a tool can answer it."#,
+                    agent_list
                 )
             }
         };
@@ -519,9 +523,11 @@ impl RoutingHandler for LlmHandler {
         match self.call_llm(&messages).await {
             Ok(content) => {
                 if self.routing_enabled {
+                    // Log raw LLM output so we can debug routing issues
+                    info!("[{}] Raw LLM response: {}", agent.name, content);
                     // Parse JSON decision
                     let mut decision = parse_llm_response(&content);
-                    debug!("[{}] Routing decision (before enforcement): {:?}", agent.name, decision);
+                    info!("[{}] Routing decision: {:?}", agent.name, decision);
 
                     // Enforce "all" routing behavior at the system level
                     // If routing_behavior is All, we MUST forward to ALL blocking connections

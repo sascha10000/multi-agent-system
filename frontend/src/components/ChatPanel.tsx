@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { SystemConfigJson } from '../types/agent';
 import type {
@@ -18,6 +18,7 @@ interface ChatMessage {
   agent?: string;
   timestamp: Date;
   trace?: AgentTraceStep[];
+  streaming?: boolean;
 }
 
 interface ChatPanelProps {
@@ -27,7 +28,229 @@ interface ChatPanelProps {
   systemName: string;
 }
 
-const API_BASE = 'http://localhost:8080/api/v1';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
+
+function getStepTypeColor(stepType: string) {
+  switch (stepType) {
+    case 'request': return 'text-blue-400 bg-blue-900/30';
+    case 'response': return 'text-green-400 bg-green-900/30';
+    case 'forward': return 'text-amber-400 bg-amber-900/30';
+    case 'synthesis': return 'text-purple-400 bg-purple-900/30';
+    default: return 'text-zinc-400 bg-zinc-700';
+  }
+}
+
+function getStepTypeIcon(stepType: string) {
+  switch (stepType) {
+    case 'request': return '→';
+    case 'response': return '←';
+    case 'forward': return '↗';
+    case 'synthesis': return '⊕';
+    default: return '•';
+  }
+}
+
+/**
+ * Extract content from JSON response format if present
+ * e.g., {"response": "hello"} → "hello"
+ * If not JSON or no "response" field, returns original string
+ */
+function unwrapJsonResponse(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed === 'object' && parsed !== null && typeof parsed.response === 'string') {
+      return parsed.response;
+    }
+  } catch {
+    // Not valid JSON, return as-is
+  }
+  return content;
+}
+
+// ── Memoized message components ──────────────────────────────────────
+// Prevents ReactMarkdown from re-parsing unchanged messages on every render.
+
+const NormalMessage = memo(function NormalMessage({
+  msg,
+}: {
+  msg: ChatMessage;
+}) {
+  if (msg.streaming) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-lg px-3 py-2 bg-zinc-800 text-zinc-100 border border-zinc-700">
+          <div className="flex items-center gap-2 text-sm text-zinc-400">
+            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <span>
+              {msg.trace && msg.trace.length > 0
+                ? `Processing... (${msg.trace.length} step${msg.trace.length !== 1 ? 's' : ''})`
+                : 'Sending to agents...'}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+    >
+      <div
+        className={`max-w-[85%] rounded-lg px-3 py-2 ${
+          msg.role === 'user'
+            ? 'bg-blue-600 text-white'
+            : msg.role === 'system'
+            ? 'bg-zinc-700 text-zinc-300 text-sm italic'
+            : 'bg-zinc-800 text-zinc-100 border border-zinc-700'
+        }`}
+      >
+        {msg.agent && (
+          <div className="text-xs text-zinc-400 mb-1 font-medium">
+            {msg.agent}
+          </div>
+        )}
+        <div className="chat-markdown">
+          <ReactMarkdown>{msg.content}</ReactMarkdown>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const VerboseTraceStep = memo(function VerboseTraceStep({
+  step,
+  onSelect,
+}: {
+  step: AgentTraceStep;
+  onSelect: (step: AgentTraceStep) => void;
+}) {
+  const getColor = (t: string) => {
+    switch (t) {
+      case 'request': return 'text-blue-400 bg-blue-900/30';
+      case 'response': return 'text-green-400 bg-green-900/30';
+      case 'forward': return 'text-amber-400 bg-amber-900/30';
+      case 'synthesis': return 'text-purple-400 bg-purple-900/30';
+      default: return 'text-zinc-400 bg-zinc-700';
+    }
+  };
+  const getIcon = (t: string) => {
+    switch (t) {
+      case 'request': return '→';
+      case 'response': return '←';
+      case 'forward': return '↗';
+      case 'synthesis': return '⊕';
+      default: return '•';
+    }
+  };
+
+  return (
+    <button onClick={() => onSelect(step)} className="w-full text-left">
+      <div className={`rounded-lg px-3 py-2 border transition-colors hover:brightness-110 cursor-pointer ${
+        step.step_type === 'request'
+          ? 'bg-blue-950/40 border-blue-800/40'
+          : step.step_type === 'forward'
+          ? 'bg-amber-950/40 border-amber-800/40'
+          : step.step_type === 'synthesis'
+          ? 'bg-purple-950/40 border-purple-800/40'
+          : 'bg-emerald-950/40 border-emerald-800/40'
+      }`}>
+        <div className="flex items-center gap-2 mb-1">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${getColor(step.step_type)}`}>
+            {getIcon(step.step_type)} {step.step_type}
+          </span>
+          <span className="text-xs text-zinc-400">
+            <span className="text-zinc-300 font-medium">{step.from}</span>
+            <span className="text-zinc-500 mx-1">&rarr;</span>
+            <span className="text-zinc-300 font-medium">{step.to}</span>
+          </span>
+        </div>
+        <div className="text-xs text-zinc-400 whitespace-pre-wrap break-words max-h-24 overflow-hidden leading-relaxed">
+          {step.content.length > 200 ? `${step.content.slice(0, 200)}...` : step.content}
+        </div>
+      </div>
+    </button>
+  );
+});
+
+const VerboseMessage = memo(function VerboseMessage({
+  msg,
+  onSelectTrace,
+}: {
+  msg: ChatMessage;
+  onSelectTrace: (step: AgentTraceStep) => void;
+}) {
+  if (msg.role === 'system') {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-lg px-3 py-2 bg-zinc-700 text-zinc-300 text-sm italic">
+          <div className="chat-markdown">
+            <ReactMarkdown>{msg.content}</ReactMarkdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (msg.role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-lg px-3 py-2 bg-blue-600 text-white">
+          <div className="chat-markdown">
+            <ReactMarkdown>{msg.content}</ReactMarkdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Assistant message
+  return (
+    <>
+      {msg.trace && msg.trace.length > 0 && (
+        <div className="space-y-1.5 ml-1">
+          {msg.trace.map((step, idx) => {
+            const isFinalResponse = step.step_type === 'response' && step.to === 'User' && idx === msg.trace!.length - 1;
+            if (isFinalResponse && !msg.streaming) return null;
+            return <VerboseTraceStep key={idx} step={step} onSelect={onSelectTrace} />;
+          })}
+        </div>
+      )}
+      {msg.streaming ? (
+        <div className="flex justify-start">
+          <div className="max-w-[85%] rounded-lg px-3 py-2 bg-zinc-800 text-zinc-100 border border-zinc-700 border-dashed">
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span>Awaiting final response...</span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex justify-start">
+          <div className="max-w-[85%] rounded-lg px-3 py-2 bg-zinc-800 text-zinc-100 border border-zinc-700">
+            {msg.agent && (
+              <div className="text-xs text-zinc-400 mb-1 font-medium flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                {msg.agent} &mdash; final response
+              </div>
+            )}
+            <div className="chat-markdown">
+              <ReactMarkdown>{msg.content}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+});
+
+// ── Main component ───────────────────────────────────────────────────
 
 export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -37,7 +260,6 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'registering' | 'creating_session' | 'ready' | 'error'>('idle');
   const [verboseMode, setVerboseMode] = useState(false);
-  const [expandedTraces, setExpandedTraces] = useState<Set<string>>(new Set());
   const [selectedTraceStep, setSelectedTraceStep] = useState<AgentTraceStep | null>(null);
 
   // Session list state
@@ -45,6 +267,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [currentView, setCurrentView] = useState<'sessions' | 'chat'>('sessions');
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -126,7 +349,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       const chatMessages: ChatMessage[] = (data.messages || []).map((msg: MessageResponse) => ({
         id: msg.id,
         role: msg.from === 'user' ? 'user' : 'assistant' as const,
-        content: msg.content,
+        content: msg.from === 'user' ? msg.content : unwrapJsonResponse(msg.content),
         agent: msg.from !== 'user' ? msg.from : undefined,
         timestamp: new Date(msg.timestamp),
       }));
@@ -189,6 +412,34 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       setDeletingSessionId(null);
     }
   }, [sessionId]);
+
+  // Delete all sessions for this system
+  const deleteAllSessions = useCallback(async () => {
+    if (!confirm(`Delete all ${sessions.length} session(s) for "${systemName}"?`)) return;
+    setDeletingAll(true);
+    try {
+      await Promise.all(
+        sessions.map((s) =>
+          fetch(`${API_BASE}/sessions/${s.id}`, { method: 'DELETE' })
+        )
+      );
+      setSessions([]);
+      // If we were in an active session, reset
+      if (sessionId) {
+        setSessionId(null);
+        setMessages([]);
+        setStatus('idle');
+        setCurrentView('sessions');
+      }
+    } catch (err) {
+      console.error('Failed to delete all sessions:', err);
+      setError(err instanceof Error ? err.message : 'Failed to delete sessions');
+      // Refresh the list to show what's left
+      fetchSessions();
+    } finally {
+      setDeletingAll(false);
+    }
+  }, [sessions, systemName, sessionId, fetchSessions]);
 
   // Initialize system and create a NEW session
   const initializeSession = useCallback(async () => {
@@ -275,13 +526,28 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       timestamp: new Date(),
     };
 
+    const streamingMsgId = `assistant-${Date.now()}`;
+
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsLoading(true);
     setError(null);
 
+    // Add a streaming placeholder message
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: streamingMsgId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        trace: [],
+        streaming: true,
+      },
+    ]);
+
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}/prompt`, {
+      const res = await fetch(`${API_BASE}/sessions/${sessionId}/prompt/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -296,40 +562,131 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         throw new Error(errorData.error || 'Failed to send message');
       }
 
-      const data: SessionPromptResponse = await res.json();
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
 
-      let assistantContent: string;
-      let agentName: string | undefined;
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      if (data.result.type === 'response') {
-        assistantContent = data.result.content;
-        agentName = data.result.from;
-      } else if (data.result.type === 'timeout') {
-        assistantContent = `Request timed out: ${data.result.message}`;
-      } else {
-        assistantContent = 'Message sent (no response expected)';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE lines: each event ends with \n\n
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || ''; // Keep incomplete part in buffer
+
+        for (const part of parts) {
+          if (!part.trim()) continue;
+
+          let eventType = 'message';
+          let data = '';
+
+          for (const line of part.split('\n')) {
+            if (line.startsWith('event:')) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              data += line.slice(5).trim();
+            } else if (line.startsWith(':')) {
+              // SSE comment (keepalive), ignore
+            }
+          }
+
+          if (!data) continue;
+
+          if (eventType === 'trace') {
+            try {
+              const traceStep: AgentTraceStep = JSON.parse(data);
+              // Append trace step to the streaming message
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === streamingMsgId
+                    ? { ...msg, trace: [...(msg.trace || []), traceStep] }
+                    : msg
+                )
+              );
+            } catch {
+              // Skip malformed trace events
+            }
+          } else if (eventType === 'complete') {
+            try {
+              const response: SessionPromptResponse = JSON.parse(data);
+
+              let content: string;
+              let agentName: string | undefined;
+
+              if (response.result.type === 'response') {
+                content = unwrapJsonResponse(response.result.content);
+                agentName = response.result.from;
+              } else if (response.result.type === 'timeout') {
+                content = `Request timed out: ${response.result.message}`;
+              } else {
+                content = 'Message sent (no response expected)';
+              }
+
+              // Finalize the streaming message
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === streamingMsgId
+                    ? {
+                        ...msg,
+                        content,
+                        agent: agentName,
+                        trace: response.trace && response.trace.length > 0 ? response.trace : msg.trace,
+                        streaming: false,
+                      }
+                    : msg
+                )
+              );
+            } catch {
+              // Skip malformed complete events
+            }
+          } else if (eventType === 'error') {
+            try {
+              const errData = JSON.parse(data);
+              throw new Error(errData.error || 'Unknown streaming error');
+            } catch (parseErr) {
+              if (parseErr instanceof Error && parseErr.message !== 'Unknown streaming error') {
+                throw new Error(data);
+              }
+              throw parseErr;
+            }
+          }
+        }
       }
 
-      const assistantMessage: ChatMessage = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: assistantContent,
-        agent: agentName,
-        timestamp: new Date(),
-        trace: data.trace && data.trace.length > 0 ? data.trace : undefined,
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
-
+      // If the message is still streaming (no complete event received), mark it as done
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === streamingMsgId && msg.streaming
+            ? { ...msg, content: msg.content || 'No response received', streaming: false }
+            : msg
+        )
+      );
     } catch (err) {
+      // Remove the streaming placeholder and show error
+      setMessages((prev) =>
+        prev
+          .filter((msg) => msg.id !== streamingMsgId || (msg.trace && msg.trace.length > 0))
+          .map((msg) =>
+            msg.id === streamingMsgId
+              ? { ...msg, content: `Error: ${err instanceof Error ? err.message : 'Failed'}`, streaming: false }
+              : msg
+          )
+      );
+
       setError(err instanceof Error ? err.message : 'Failed to send message');
-      // Add error message to chat
-      setMessages((prev) => [...prev, {
-        id: `error-${Date.now()}`,
-        role: 'system',
-        content: `Error: ${err instanceof Error ? err.message : 'Failed to send message'}`,
-        timestamp: new Date(),
-      }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `error-${Date.now()}`,
+          role: 'system',
+          content: `Error: ${err instanceof Error ? err.message : 'Failed to send message'}`,
+          timestamp: new Date(),
+        },
+      ]);
     } finally {
       setIsLoading(false);
     }
@@ -347,50 +704,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     setMessages([]);
     setStatus('idle');
     setError(null);
-    setExpandedTraces(new Set());
     setCurrentView('sessions');
-  };
-
-  const toggleTraceExpanded = (messageId: string) => {
-    setExpandedTraces((prev) => {
-      const next = new Set(prev);
-      if (next.has(messageId)) {
-        next.delete(messageId);
-      } else {
-        next.add(messageId);
-      }
-      return next;
-    });
-  };
-
-  const getStepTypeColor = (stepType: string) => {
-    switch (stepType) {
-      case 'request':
-        return 'text-blue-400 bg-blue-900/30';
-      case 'response':
-        return 'text-green-400 bg-green-900/30';
-      case 'forward':
-        return 'text-amber-400 bg-amber-900/30';
-      case 'synthesis':
-        return 'text-purple-400 bg-purple-900/30';
-      default:
-        return 'text-zinc-400 bg-zinc-700';
-    }
-  };
-
-  const getStepTypeIcon = (stepType: string) => {
-    switch (stepType) {
-      case 'request':
-        return '→';
-      case 'response':
-        return '←';
-      case 'forward':
-        return '↗';
-      case 'synthesis':
-        return '⊕';
-      default:
-        return '•';
-    }
   };
 
   // Format date for session list
@@ -444,21 +758,6 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           )}
         </div>
         <div className="flex items-center gap-2">
-          {currentView === 'chat' && (
-            <button
-              onClick={() => setVerboseMode(!verboseMode)}
-              className={`p-1.5 rounded transition-colors ${
-                verboseMode
-                  ? 'text-amber-400 bg-amber-900/30 hover:bg-amber-900/50'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
-              }`}
-              title={verboseMode ? 'Hide agent trace' : 'Show agent trace'}
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </button>
-          )}
           <button
             onClick={onClose}
             className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors"
@@ -469,6 +768,40 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </button>
         </div>
       </div>
+
+      {/* Mode switcher - only in chat view */}
+      {currentView === 'chat' && (
+        <div className="px-4 py-2 border-b border-zinc-700 bg-zinc-850 flex items-center gap-2">
+          <div className="flex bg-zinc-800 rounded-lg p-0.5 flex-1">
+            <button
+              onClick={() => setVerboseMode(false)}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                !verboseMode
+                  ? 'bg-zinc-600 text-zinc-100 shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-300'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+              Normal
+            </button>
+            <button
+              onClick={() => setVerboseMode(true)}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                verboseMode
+                  ? 'bg-amber-900/60 text-amber-300 shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-300'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Verbose
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Status bar for errors */}
       {error && (
@@ -490,17 +823,36 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       {/* Sessions List View */}
       {currentView === 'sessions' && (
         <div className="flex-1 overflow-y-auto">
-          {/* New Session Button */}
-          <div className="p-4 border-b border-zinc-700">
+          {/* New Session + Delete All Buttons */}
+          <div className="p-4 border-b border-zinc-700 flex gap-2">
             <button
               onClick={initializeSession}
-              className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+              className="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
               New Session
             </button>
+            {sessions.length > 0 && (
+              <button
+                onClick={deleteAllSessions}
+                disabled={deletingAll}
+                className="px-3 py-3 text-red-400 hover:text-red-300 hover:bg-red-900/20 border border-zinc-700 hover:border-red-800/50 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                title="Delete all sessions"
+              >
+                {deletingAll ? (
+                  <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
 
           {/* Sessions List */}
@@ -614,81 +966,21 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </div>
         )}
 
-        {messages.map((msg) => (
-          <div key={msg.id} className="space-y-2">
-            <div
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              <div
-                className={`max-w-[85%] rounded-lg px-3 py-2 ${
-                  msg.role === 'user'
-                    ? 'bg-blue-600 text-white'
-                    : msg.role === 'system'
-                    ? 'bg-zinc-700 text-zinc-300 text-sm italic'
-                    : 'bg-zinc-800 text-zinc-100 border border-zinc-700'
-                }`}
-              >
-                {msg.agent && (
-                  <div className="text-xs text-zinc-400 mb-1 font-medium">
-                    {msg.agent}
-                  </div>
-                )}
-                <div className="chat-markdown">
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
-                </div>
-              </div>
-            </div>
-
-            {/* Agent Trace Display */}
-            {verboseMode && msg.trace && msg.trace.length > 0 && (
-              <div className="ml-4">
-                <button
-                  onClick={() => toggleTraceExpanded(msg.id)}
-                  className="flex items-center gap-2 text-xs text-amber-400 hover:text-amber-300 transition-colors"
-                >
-                  <svg
-                    className={`w-3 h-3 transition-transform ${expandedTraces.has(msg.id) ? 'rotate-90' : ''}`}
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                  <span>{msg.trace.length} agent communication{msg.trace.length !== 1 ? 's' : ''}</span>
-                </button>
-
-                {expandedTraces.has(msg.id) && (
-                  <div className="mt-2 space-y-1 border-l-2 border-amber-900/50 pl-3">
-                    {msg.trace.map((step, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => setSelectedTraceStep(step)}
-                        className="w-full text-left text-xs bg-zinc-800/50 rounded p-2 border border-zinc-700/50 hover:bg-zinc-700/50 hover:border-zinc-600 transition-colors cursor-pointer"
-                      >
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getStepTypeColor(step.step_type)}`}>
-                            {getStepTypeIcon(step.step_type)} {step.step_type}
-                          </span>
-                          <span className="text-zinc-400">
-                            <span className="text-zinc-300 font-medium">{step.from}</span>
-                            {' → '}
-                            <span className="text-zinc-300 font-medium">{step.to}</span>
-                          </span>
-                          <span className="ml-auto text-zinc-500 text-[10px]">Click to expand</span>
-                        </div>
-                        <div className="text-zinc-400 mt-1 whitespace-pre-wrap break-words max-h-20 overflow-hidden">
-                          {step.content.length > 150 ? `${step.content.slice(0, 150)}...` : step.content}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+        {/* ===== Normal Mode ===== */}
+        {!verboseMode && messages.map((msg) => (
+          <div key={msg.id}>
+            <NormalMessage msg={msg} />
           </div>
         ))}
 
-        {isLoading && (
+        {/* ===== Verbose Mode ===== */}
+        {verboseMode && messages.map((msg) => (
+          <div key={msg.id} className="space-y-2">
+            <VerboseMessage msg={msg} onSelectTrace={setSelectedTraceStep} />
+          </div>
+        ))}
+
+        {isLoading && !messages.some((m) => m.streaming) && (
           <div className="flex justify-start">
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2">
               <div className="flex items-center gap-1">

@@ -19,12 +19,30 @@ export default function AgentModal({
   onClose,
 }: AgentModalProps) {
   const [formData, setFormData] = useState<AgentNodeData | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (agent) {
       setFormData({ ...agent });
+      setErrors({});
     }
   }, [agent]);
+
+  const validateForm = (data: AgentNodeData): Record<string, string> => {
+    const errs: Record<string, string> = {};
+
+    if (!data.name.trim()) {
+      errs.name = 'Name is required';
+    }
+    if (data.temperature < 0 || data.temperature > 2) {
+      errs.temperature = 'Must be between 0 and 2';
+    }
+    if (data.maxTokens < 1 || data.maxTokens > 128000) {
+      errs.maxTokens = 'Must be between 1 and 128,000';
+    }
+
+    return errs;
+  };
 
   if (!isOpen || !formData) return null;
 
@@ -45,7 +63,12 @@ export default function AgentModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (formData) {
+    if (!formData) return;
+
+    const validationErrors = validateForm(formData);
+    setErrors(validationErrors);
+
+    if (Object.keys(validationErrors).length === 0) {
       onSave(formData);
     }
   };
@@ -79,9 +102,13 @@ export default function AgentModal({
                 name="name"
                 value={formData.name}
                 onChange={handleChange}
-                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                required
+                className={`w-full px-3 py-2 bg-zinc-800 border rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none ${
+                  errors.name ? 'border-red-500' : 'border-zinc-600'
+                }`}
               />
+              {errors.name && (
+                <p className="text-red-400 text-xs mt-1">{errors.name}</p>
+              )}
             </div>
 
             <div>
@@ -131,7 +158,7 @@ export default function AgentModal({
 
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-1">
-                  Temperature
+                  Temperature <span className="text-zinc-500 font-normal">(0-2)</span>
                 </label>
                 <input
                   type="number"
@@ -141,13 +168,18 @@ export default function AgentModal({
                   min="0"
                   max="2"
                   step="0.1"
-                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  className={`w-full px-3 py-2 bg-zinc-800 border rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none ${
+                    errors.temperature ? 'border-red-500' : 'border-zinc-600'
+                  }`}
                 />
+                {errors.temperature && (
+                  <p className="text-red-400 text-xs mt-1">{errors.temperature}</p>
+                )}
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-1">
-                  Max Tokens
+                  Max Tokens <span className="text-zinc-500 font-normal">(1-128k)</span>
                 </label>
                 <input
                   type="number"
@@ -155,9 +187,15 @@ export default function AgentModal({
                   value={formData.maxTokens}
                   onChange={handleChange}
                   min="1"
-                  step="100"
-                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  max="128000"
+                  step="1"
+                  className={`w-full px-3 py-2 bg-zinc-800 border rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none ${
+                    errors.maxTokens ? 'border-red-500' : 'border-zinc-600'
+                  }`}
                 />
+                {errors.maxTokens && (
+                  <p className="text-red-400 text-xs mt-1">{errors.maxTokens}</p>
+                )}
               </div>
             </div>
           </div>

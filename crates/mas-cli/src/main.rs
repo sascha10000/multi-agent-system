@@ -48,8 +48,20 @@ fn get_arg_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Build a custom tokio runtime with larger worker thread stacks.
+    // The default 2 MB stack overflows when deeply-nested async futures
+    // are involved (agent routing → forwarding → MCP client calls).
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024) // 8 MB
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // Parse command line arguments first to check for --quiet
     let args: Vec<String> = std::env::args().collect();
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");

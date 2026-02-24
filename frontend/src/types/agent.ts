@@ -77,6 +77,9 @@ export interface SystemConfigJson {
   llm_providers?: Record<string, LlmProviderConfig>;
   agents: AgentConfig[];
   tools?: ToolConfig[];
+  editor_metadata?: {
+    node_positions?: Record<string, { x: number; y: number }>;
+  };
 }
 
 // React Flow specific types

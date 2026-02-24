@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && rm -rf ../crates/mas-api/static/* && cp -R out/* ../crates/mas-api/static/",
     "start": "next start",
     "lint": "eslint"
   },

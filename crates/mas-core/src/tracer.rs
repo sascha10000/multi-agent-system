@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 /// A single trace event capturing an agent communication
 #[derive(Debug, Clone, Serialize)]
@@ -65,20 +65,42 @@ impl TraceEvent {
 /// Collector for trace events
 ///
 /// This is a thread-safe collector that can be shared across async tasks.
-/// Clone it to share between tasks - all clones share the same underlying storage.
-#[derive(Debug, Clone, Default)]
+/// Clone it to share between tasks - all clones share the same underlying storage
+/// and broadcast channel.
+#[derive(Debug, Clone)]
 pub struct TraceCollector {
     events: Arc<RwLock<Vec<TraceEvent>>>,
+    broadcast_tx: broadcast::Sender<TraceEvent>,
+}
+
+impl Default for TraceCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TraceCollector {
     /// Create a new empty trace collector
     pub fn new() -> Self {
-        Self::default()
+        let (broadcast_tx, _) = broadcast::channel(128);
+        Self {
+            events: Arc::new(RwLock::new(Vec::new())),
+            broadcast_tx,
+        }
+    }
+
+    /// Subscribe to real-time trace events via a broadcast receiver.
+    ///
+    /// Each subscriber receives all events recorded after subscribing.
+    /// Subscribe before starting work to avoid missing events.
+    pub fn subscribe(&self) -> broadcast::Receiver<TraceEvent> {
+        self.broadcast_tx.subscribe()
     }
 
     /// Record a trace event
     pub async fn record(&self, event: TraceEvent) {
+        // Broadcast to any live subscribers (ignore if none)
+        let _ = self.broadcast_tx.send(event.clone());
         let mut events = self.events.write().await;
         events.push(event);
     }

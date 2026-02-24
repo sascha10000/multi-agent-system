@@ -23,6 +23,7 @@ import AgentModal from '../components/AgentModal';
 import ToolNode from '../components/ToolNode';
 import ToolModal from '../components/ToolModal';
 import ChatPanel from '../components/ChatPanel';
+import SystemsOverview from '../components/SystemsOverview';
 import type {
   AgentNodeData,
   ToolNodeData,
@@ -33,67 +34,124 @@ import type {
   EndpointType,
 } from '../types/agent';
 
-// Initial nodes for demo - includes an MCP tool example
-const initialNodes: Node<AgentNodeData | ToolNodeData>[] = [
-  {
-    id: '1',
-    type: 'agent',
-    position: { x: 250, y: 50 },
-    data: {
-      name: 'Assistant',
-      systemPrompt: 'You are a helpful assistant. When users ask about jobs, use the JobSearch tool to find relevant listings. Format the results in a clear, readable way.',
-      provider: 'default',
-      model: 'llama3.2',
-      routing: true,
-      routingBehavior: 'best',
-      temperature: 0.3,
-      maxTokens: 1000,
-    },
-  },
-  {
-    id: '2',
-    type: 'tool',
-    position: { x: 100, y: 250 },
-    data: {
-      name: 'JobSearch',
-      description: 'Search for job listings. Can search by keywords, location, and job type.',
-      endpointType: 'mcp',
-      endpointUrl: 'https://joblyst.sascha10k.biz/mcp',
-      endpointMethod: 'POST',
-      mcpToolName: 'search_jobs',
-      headers: {},
-      bodyTemplate: '',
-      parameters: '{\n  "type": "object",\n  "properties": {\n    "query": {\n      "type": "string",\n      "description": "Search keywords (e.g., software engineer, data scientist)"\n    },\n    "location": {\n      "type": "string",\n      "description": "Job location (e.g., Berlin, Remote)"\n    }\n  },\n  "required": ["query"]\n}',
-      extractPath: '',
-      responseFormat: 'json',
-      timeoutSecs: 30,
-    },
-  },
-  {
-    id: '3',
-    type: 'agent',
-    position: { x: 400, y: 250 },
-    data: {
-      name: 'Analyst',
-      systemPrompt: 'You analyze information and provide insights.',
-      provider: 'default',
-      model: 'llama3.2',
-      routing: false,
-      routingBehavior: 'best',
-      temperature: 0.5,
-      maxTokens: 1500,
-    },
-  },
-];
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
 
-const initialEdges: Edge[] = [
-  { id: 'e1-2', source: '1', target: '2', animated: true },
-  { id: 'e1-3', source: '1', target: '3', animated: true },
-];
+/** Convert a SystemConfigJson into ReactFlow nodes and edges, using saved positions when available */
+function configToNodesAndEdges(config: SystemConfigJson): {
+  nodes: Node<AgentNodeData | ToolNodeData>[];
+  edges: Edge[];
+} {
+  const savedPositions = config.editor_metadata?.node_positions || {};
+  const nameToId: Record<string, string> = {};
+
+  // Calculate grid positions as fallback
+  const totalItems = config.agents.length + (config.tools?.length || 0);
+  const cols = Math.max(1, Math.ceil(Math.sqrt(totalItems)));
+  const spacingX = 250;
+  const spacingY = 200;
+
+  let itemIndex = 0;
+
+  // Convert agents to nodes
+  const agentNodes: Node<AgentNodeData>[] = config.agents.map((agent) => {
+    const nodeId = `node-${agent.name}`;
+    nameToId[agent.name] = nodeId;
+
+    const saved = savedPositions[agent.name];
+    const row = Math.floor(itemIndex / cols);
+    const col = itemIndex % cols;
+    itemIndex++;
+
+    return {
+      id: nodeId,
+      type: 'agent',
+      position: saved
+        ? { x: saved.x, y: saved.y }
+        : { x: 100 + col * spacingX, y: 50 + row * spacingY },
+      data: {
+        name: agent.name,
+        systemPrompt: agent.system_prompt || 'You are a helpful assistant.',
+        provider: agent.handler?.provider || 'default',
+        model: agent.handler?.model || 'llama3.2',
+        routing: agent.handler?.routing || false,
+        routingBehavior: (agent.handler?.routing_behavior as RoutingBehavior) || 'best',
+        temperature: agent.handler?.options?.temperature ?? 0.7,
+        maxTokens: agent.handler?.options?.max_tokens ?? 1000,
+      },
+    };
+  });
+
+  // Convert tools to nodes
+  const toolNodes: Node<ToolNodeData>[] = (config.tools || []).map((tool) => {
+    const nodeId = `node-${tool.name}`;
+    nameToId[tool.name] = nodeId;
+
+    const saved = savedPositions[tool.name];
+    const row = Math.floor(itemIndex / cols);
+    const col = itemIndex % cols;
+    itemIndex++;
+
+    const endpointType = tool.endpoint.type || (tool.endpoint.mcp_tool_name ? 'mcp' : 'http');
+
+    return {
+      id: nodeId,
+      type: 'tool',
+      position: saved
+        ? { x: saved.x, y: saved.y }
+        : { x: 100 + col * spacingX, y: 50 + row * spacingY },
+      data: {
+        name: tool.name,
+        description: tool.description,
+        endpointType: endpointType,
+        endpointUrl: tool.endpoint.url,
+        endpointMethod: tool.endpoint.method || 'POST',
+        mcpToolName: tool.endpoint.mcp_tool_name || '',
+        headers: tool.endpoint.headers || {},
+        bodyTemplate: tool.endpoint.body_template
+          ? JSON.stringify(tool.endpoint.body_template, null, 2)
+          : '',
+        parameters: tool.parameters
+          ? JSON.stringify(tool.parameters, null, 2)
+          : '{\n  "type": "object",\n  "properties": {}\n}',
+        extractPath: tool.response_mapping?.extract_path || '',
+        responseFormat: tool.response_mapping?.format || 'json',
+        timeoutSecs: tool.timeout_secs || 30,
+      },
+    };
+  });
+
+  // Build edges from connections
+  const newEdges: Edge[] = [];
+  config.agents.forEach((agent) => {
+    if (agent.connections) {
+      const sourceId = nameToId[agent.name];
+      Object.keys(agent.connections).forEach((targetName) => {
+        const targetId = nameToId[targetName];
+        if (sourceId && targetId) {
+          newEdges.push({
+            id: `e-${sourceId}-${targetId}`,
+            source: sourceId,
+            target: targetId,
+            animated: true,
+          });
+        }
+      });
+    }
+  });
+
+  return { nodes: [...agentNodes, ...toolNodes], edges: newEdges };
+}
 
 export default function EditorPage() {
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  // View state: overview (dashboard) vs editor (ReactFlow)
+  const [currentView, setCurrentView] = useState<'overview' | 'editor'>('overview');
+  const [currentSystemName, setCurrentSystemName] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState([] as Node<AgentNodeData | ToolNodeData>[]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([] as Edge[]);
 
   // Modal state - separate for agents and tools
   const [agentModalOpen, setAgentModalOpen] = useState(false);
@@ -102,7 +160,6 @@ export default function EditorPage() {
 
   // Chat panel state
   const [chatOpen, setChatOpen] = useState(false);
-  const [systemName, setSystemName] = useState('my-agent-system');
 
   // File input ref for JSON import
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -121,15 +178,11 @@ export default function EditorPage() {
   // Handle new connections with validation
   const onConnect = useCallback(
     (connection: Connection) => {
-      // Find the source node
       const sourceNode = nodes.find((n) => n.id === connection.source);
-
-      // Tools cannot be sources (they don't initiate connections)
       if (sourceNode?.type === 'tool') {
         console.warn('Tools cannot initiate connections');
         return;
       }
-
       setEdges((eds) => addEdge({ ...connection, animated: true }, eds));
     },
     [nodes, setEdges]
@@ -252,16 +305,16 @@ export default function EditorPage() {
     setSelectedNodeId(null);
   }, [selectedNodeId, setNodes, setEdges]);
 
-  // Export to API format
+  // Export to API format (includes editor_metadata with node positions)
   const exportConfig = useCallback((): SystemConfigJson => {
-    // Separate agents and tools
     const agentNodes = nodes.filter((n) => n.type === 'agent');
     const toolNodes = nodes.filter((n) => n.type === 'tool');
 
-    // Create name-to-id mapping for all nodes
-    const nameToId: Record<string, string> = {};
+    // Build node positions map (keyed by agent/tool name)
+    const nodePositions: Record<string, { x: number; y: number }> = {};
     nodes.forEach((node) => {
-      nameToId[node.data.name as string] = node.id;
+      const name = node.data.name as string;
+      nodePositions[name] = { x: node.position.x, y: node.position.y };
     });
 
     // Convert agent nodes to AgentConfig
@@ -269,7 +322,6 @@ export default function EditorPage() {
       const data = node.data as AgentNodeData;
       const connections: Record<string, { type: 'blocking' | 'notify'; timeout_secs?: number }> = {};
 
-      // Find all edges where this node is the source
       edges
         .filter((edge) => edge.source === node.id)
         .forEach((edge) => {
@@ -303,7 +355,6 @@ export default function EditorPage() {
     const tools: ToolConfig[] = toolNodes.map((node) => {
       const data = node.data as ToolNodeData;
 
-      // Parse JSON strings back to objects
       let parameters: Record<string, unknown> = {};
       let bodyTemplate: Record<string, unknown> | undefined;
 
@@ -315,7 +366,6 @@ export default function EditorPage() {
         console.warn('Failed to parse parameters JSON for tool:', data.name);
       }
 
-      // Only parse body template for HTTP endpoints
       if (data.endpointType !== 'mcp') {
         try {
           if (data.bodyTemplate) {
@@ -357,23 +407,46 @@ export default function EditorPage() {
       },
       agents,
       tools: tools.length > 0 ? tools : undefined,
+      editor_metadata: {
+        node_positions: nodePositions,
+      },
     };
   }, [nodes, edges]);
 
-  // Handle export button click
+  // Handle export button click (copy to clipboard)
   const handleExport = useCallback(() => {
     const config = exportConfig();
     const json = JSON.stringify(config, null, 2);
-
-    // Copy to clipboard
     navigator.clipboard.writeText(json).then(() => {
       alert('Configuration copied to clipboard!');
     });
-
-    console.log('Exported configuration:', config);
   }, [exportConfig]);
 
-  // Import JSON configuration file
+  // Load a config into the editor (from overview or import)
+  const loadConfigIntoEditor = useCallback((name: string | null, config: SystemConfigJson) => {
+    const { nodes: newNodes, edges: newEdges } = configToNodesAndEdges(config);
+    setNodes(newNodes);
+    setEdges(newEdges);
+    setCurrentSystemName(name);
+    setCurrentView('editor');
+  }, [setNodes, setEdges]);
+
+  // Handle selecting a system from the overview
+  const handleSelectSystem = useCallback((name: string, config: SystemConfigJson) => {
+    loadConfigIntoEditor(name, config);
+  }, [loadConfigIntoEditor]);
+
+  // Handle "New System" from the overview
+  const handleNewSystem = useCallback(() => {
+    setNodes([]);
+    setEdges([]);
+    setCurrentSystemName(null);
+    setCurrentView('editor');
+    setEditingName(true);
+    setTimeout(() => nameInputRef.current?.focus(), 100);
+  }, [setNodes, setEdges]);
+
+  // Handle import JSON (shared between overview and editor)
   const handleImport = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -389,118 +462,10 @@ export default function EditorPage() {
           return;
         }
 
-        // Create a map from name to node ID (for both agents and tools)
-        const nameToId: Record<string, string> = {};
-
-        // Calculate grid positions
-        const totalItems = config.agents.length + (config.tools?.length || 0);
-        const cols = Math.ceil(Math.sqrt(totalItems));
-        const spacingX = 250;
-        const spacingY = 200;
-
-        let itemIndex = 0;
-
-        // Convert agents to nodes
-        const agentNodes: Node<AgentNodeData>[] = config.agents.map((agent) => {
-          const nodeId = `imported-agent-${Date.now()}-${itemIndex}`;
-          nameToId[agent.name] = nodeId;
-
-          const row = Math.floor(itemIndex / cols);
-          const col = itemIndex % cols;
-          itemIndex++;
-
-          return {
-            id: nodeId,
-            type: 'agent',
-            position: {
-              x: 100 + col * spacingX,
-              y: 50 + row * spacingY,
-            },
-            data: {
-              name: agent.name,
-              systemPrompt: agent.system_prompt || 'You are a helpful assistant.',
-              provider: agent.handler?.provider || 'default',
-              model: agent.handler?.model || 'llama3.2',
-              routing: agent.handler?.routing || false,
-              routingBehavior: (agent.handler?.routing_behavior as RoutingBehavior) || 'best',
-              temperature: agent.handler?.options?.temperature ?? 0.7,
-              maxTokens: agent.handler?.options?.max_tokens ?? 1000,
-            },
-          };
-        });
-
-        // Convert tools to nodes
-        const toolNodes: Node<ToolNodeData>[] = (config.tools || []).map((tool) => {
-          const nodeId = `imported-tool-${Date.now()}-${itemIndex}`;
-          nameToId[tool.name] = nodeId;
-
-          const row = Math.floor(itemIndex / cols);
-          const col = itemIndex % cols;
-          itemIndex++;
-
-          // Determine endpoint type from config
-          const endpointType = tool.endpoint.type || (tool.endpoint.mcp_tool_name ? 'mcp' : 'http');
-
-          return {
-            id: nodeId,
-            type: 'tool',
-            position: {
-              x: 100 + col * spacingX,
-              y: 50 + row * spacingY,
-            },
-            data: {
-              name: tool.name,
-              description: tool.description,
-              endpointType: endpointType,
-              endpointUrl: tool.endpoint.url,
-              endpointMethod: tool.endpoint.method || 'POST',
-              mcpToolName: tool.endpoint.mcp_tool_name || '',
-              headers: tool.endpoint.headers || {},
-              bodyTemplate: tool.endpoint.body_template
-                ? JSON.stringify(tool.endpoint.body_template, null, 2)
-                : '',
-              parameters: tool.parameters
-                ? JSON.stringify(tool.parameters, null, 2)
-                : '{\n  "type": "object",\n  "properties": {}\n}',
-              extractPath: tool.response_mapping?.extract_path || '',
-              responseFormat: tool.response_mapping?.format || 'json',
-              timeoutSecs: tool.timeout_secs || 30,
-            },
-          };
-        });
-
-        // Combine all nodes
-        const newNodes = [...agentNodes, ...toolNodes];
-
-        // Convert connections to edges
-        const newEdges: Edge[] = [];
-        config.agents.forEach((agent) => {
-          if (agent.connections) {
-            const sourceId = nameToId[agent.name];
-            Object.keys(agent.connections).forEach((targetName) => {
-              const targetId = nameToId[targetName];
-              if (sourceId && targetId) {
-                newEdges.push({
-                  id: `e-${sourceId}-${targetId}`,
-                  source: sourceId,
-                  target: targetId,
-                  animated: true,
-                });
-              }
-            });
-          }
-        });
-
-        // Update the editor with imported data
-        setNodes(newNodes);
-        setEdges(newEdges);
-
-        // Update system name from file name (remove .json extension)
         const baseName = file.name.replace(/\.json$/i, '');
-        setSystemName(baseName);
-
-        console.log('Imported configuration:', config);
-        alert(`Imported ${agentNodes.length} agents, ${toolNodes.length} tools, and ${newEdges.length} connections`);
+        loadConfigIntoEditor(null, config);
+        // Set a default name from the file name (user can change on save)
+        setCurrentSystemName(baseName);
       } catch (error) {
         console.error('Failed to parse JSON:', error);
         alert('Failed to parse JSON file. Please ensure it is valid JSON.');
@@ -508,15 +473,110 @@ export default function EditorPage() {
     };
 
     reader.readAsText(file);
-    // Reset file input so the same file can be imported again
     event.target.value = '';
-  }, [setNodes, setEdges]);
+  }, [loadConfigIntoEditor]);
+
+  // Trigger file input from overview or editor
+  const triggerImport = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  // Save system to backend. Optional overrides for rename-and-save flow.
+  const handleSave = useCallback(async (nameOverride?: string, oldName?: string) => {
+    const config = exportConfig();
+
+    const name = nameOverride || currentSystemName;
+    if (!name) {
+      alert('Please set a system name before saving.');
+      setEditingName(true);
+      setTimeout(() => nameInputRef.current?.focus(), 50);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      // If renamed, delete the old system first
+      if (oldName && oldName !== name) {
+        await fetch(`${API_BASE}/systems/${encodeURIComponent(oldName)}`, { method: 'DELETE' }).catch(() => {});
+      }
+
+      // Try PUT first (update existing), fall back to POST (create new)
+      const updateRes = await fetch(`${API_BASE}/systems/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config }),
+      });
+
+      if (updateRes.ok) {
+        setCurrentSystemName(name);
+        return;
+      }
+
+      if (updateRes.status === 404) {
+        // System doesn't exist yet, create it
+        const createRes = await fetch(`${API_BASE}/systems`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, config }),
+        });
+
+        if (!createRes.ok) {
+          const err = await createRes.json().catch(() => ({}));
+          throw new Error(err.error || `Failed to create system (${createRes.status})`);
+        }
+
+        setCurrentSystemName(name);
+        return;
+      }
+
+      const err = await updateRes.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to save system (${updateRes.status})`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save system');
+    } finally {
+      setSaving(false);
+    }
+  }, [exportConfig, currentSystemName]);
+
+  // Back to overview
+  const handleBackToOverview = useCallback(() => {
+    setChatOpen(false);
+    setCurrentView('overview');
+  }, []);
 
   // Get current config for chat
   const currentConfig = useMemo(() => exportConfig(), [exportConfig]);
+  const systemName = currentSystemName || 'untitled-system';
 
+  // Hidden file input (shared across views)
+  const fileInput = (
+    <input
+      type="file"
+      ref={fileInputRef}
+      onChange={handleImport}
+      accept=".json,application/json"
+      className="hidden"
+    />
+  );
+
+  // ========== Overview View ==========
+  if (currentView === 'overview') {
+    return (
+      <>
+        {fileInput}
+        <SystemsOverview
+          onSelectSystem={handleSelectSystem}
+          onNewSystem={handleNewSystem}
+          onImportJson={triggerImport}
+        />
+      </>
+    );
+  }
+
+  // ========== Editor View ==========
   return (
     <div className="w-screen h-screen">
+      {fileInput}
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -534,24 +594,42 @@ export default function EditorPage() {
         <Controls />
         <MiniMap
           nodeColor={(node) => {
-            if (node.type === 'tool') return '#f59e0b'; // amber for tools
-            if ((node.data as AgentNodeData)?.routing) return '#a855f7'; // purple for routing agents
-            return '#3b82f6'; // blue for regular agents
+            if (node.type === 'tool') return '#f59e0b';
+            if ((node.data as AgentNodeData)?.routing) return '#a855f7';
+            return '#3b82f6';
           }}
           maskColor="rgba(0, 0, 0, 0.1)"
         />
 
-        {/* Hidden file input for JSON import */}
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handleImport}
-          accept=".json,application/json"
-          className="hidden"
-        />
-
         {/* Toolbar */}
-        <Panel position="top-left" className="flex gap-2">
+        <Panel position="top-left" className="flex gap-2 flex-wrap">
+          <button
+            onClick={handleBackToOverview}
+            className="flex items-center gap-2 px-4 py-2 bg-zinc-700 text-white text-sm font-medium rounded-lg shadow-md hover:bg-zinc-600 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Systems
+          </button>
+          <button
+            onClick={() => handleSave()}
+            disabled={saving}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? (
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+            )}
+            Save
+          </button>
+          <div className="w-px h-8 bg-zinc-600 self-center" />
           <button
             onClick={addAgent}
             className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg shadow-md hover:bg-blue-600 transition-colors"
@@ -577,13 +655,13 @@ export default function EditorPage() {
             Add Tool
           </button>
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={triggerImport}
             className="flex items-center gap-2 px-4 py-2 bg-zinc-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-zinc-700 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m4-8l-4 4m0 0l-4-4m4 4V4" />
             </svg>
-            Import JSON
+            Import
           </button>
           <button
             onClick={handleExport}
@@ -592,7 +670,7 @@ export default function EditorPage() {
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
             </svg>
-            Export JSON
+            Export
           </button>
           <button
             onClick={() => setChatOpen(true)}
@@ -605,9 +683,58 @@ export default function EditorPage() {
           </button>
         </Panel>
 
+        {/* System name indicator (click to edit) */}
+        <Panel position="top-right" className="bg-zinc-800/90 px-3 py-1.5 rounded-lg">
+          <span className="text-xs text-zinc-400">System: </span>
+          {editingName ? (
+            <input
+              ref={nameInputRef}
+              autoFocus
+              className="text-xs text-zinc-200 font-medium bg-zinc-700 border border-zinc-500 rounded px-1.5 py-0.5 outline-none focus:border-blue-500 w-40"
+              defaultValue={currentSystemName || ''}
+              placeholder="Enter system name"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const val = e.currentTarget.value.trim();
+                  if (val) {
+                    const oldName = currentSystemName;
+                    setCurrentSystemName(val);
+                    setEditingName(false);
+                    handleSave(val, oldName && oldName !== val ? oldName : undefined);
+                  }
+                } else if (e.key === 'Escape') {
+                  setEditingName(false);
+                }
+              }}
+              onBlur={(e) => {
+                const val = e.currentTarget.value.trim();
+                if (val) {
+                  const oldName = currentSystemName;
+                  setCurrentSystemName(val);
+                  setEditingName(false);
+                  handleSave(val, oldName && oldName !== val ? oldName : undefined);
+                } else {
+                  setEditingName(false);
+                }
+              }}
+            />
+          ) : (
+            <button
+              onClick={() => setEditingName(true)}
+              className="text-xs text-zinc-200 font-medium hover:text-blue-400 transition-colors cursor-pointer"
+              title="Click to rename"
+            >
+              {systemName}
+              <svg className="w-3 h-3 inline-block ml-1 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+          )}
+        </Panel>
+
         {/* Help text */}
         <Panel position="bottom-center" className="text-xs text-zinc-400 bg-zinc-800/90 px-3 py-1.5 rounded-lg">
-          Double-click to edit • Drag to connect • Delete/Backspace to remove
+          Double-click to edit &bull; Drag to connect &bull; Delete/Backspace to remove
         </Panel>
       </ReactFlow>
 

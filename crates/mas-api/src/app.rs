@@ -43,6 +43,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/systems", post(handlers::create_system))
         .route("/systems", get(handlers::list_systems))
         .route("/systems/:name", get(handlers::get_system))
+        .route("/systems/:name/config", get(handlers::get_system_config))
         .route("/systems/:name", put(handlers::update_system))
         .route("/systems/:name", delete(handlers::delete_system))
         // Prompt handling (direct system prompt, no session)
@@ -55,6 +56,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/sessions/:id/history", get(handlers::get_session_history))
         .route("/sessions/:id/search", get(handlers::search_session))
         .route("/sessions/:id/prompt", post(handlers::send_session_prompt))
+        .route("/sessions/:id/prompt/stream", post(handlers::send_session_prompt_stream))
         .route("/sessions/:id/build-index", post(handlers::build_session_index));
 
     // Serve static files, checking multiple possible locations

@@ -84,6 +84,37 @@ export interface ApiError {
   details?: string;
 }
 
+// System list types
+export interface SystemSummary {
+  name: string;
+  agent_count: number;
+  agents: string[];
+  created_at: string;
+}
+
+export interface ListSystemsResponse {
+  systems: SystemSummary[];
+  total: number;
+}
+
+export interface SystemConfigResponse {
+  name: string;
+  config: import('./agent').SystemConfigJson;
+  created_at: string;
+}
+
+export interface DeleteSystemResponse {
+  name: string;
+  message: string;
+}
+
+export interface UpdateSystemResponse {
+  name: string;
+  message: string;
+  agent_count: number;
+  updated_at: string;
+}
+
 // Session list types
 export interface SessionSummary {
   id: string;
@@ -102,3 +133,21 @@ export interface DeleteSessionResponse {
   id: string;
   message: string;
 }
+
+// SSE streaming event types for /sessions/{id}/prompt/stream
+export interface SseTraceEvent {
+  type: 'trace';
+  data: AgentTraceStep;
+}
+
+export interface SseCompleteEvent {
+  type: 'complete';
+  data: SessionPromptResponse;
+}
+
+export interface SseErrorEvent {
+  type: 'error';
+  data: { error: string };
+}
+
+export type SseEvent = SseTraceEvent | SseCompleteEvent | SseErrorEvent;

@@ -68,6 +68,14 @@ pub struct ConnectionInfo {
     pub timeout_secs: Option<u64>,
 }
 
+/// Full system config response (for editor reload)
+#[derive(Debug, Serialize)]
+pub struct SystemConfigResponse {
+    pub name: String,
+    pub config: SystemConfigJson,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Request body for sending a prompt to a system
 #[derive(Debug, Deserialize)]
 pub struct SendPromptRequest {

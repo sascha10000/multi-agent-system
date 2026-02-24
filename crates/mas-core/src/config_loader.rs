@@ -63,6 +63,9 @@ pub struct SystemConfigJson {
     /// Tool definitions (optional)
     #[serde(default)]
     pub tools: Vec<ToolConfig>,
+    /// Opaque metadata for the visual editor (node positions, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_metadata: Option<serde_json::Value>,
 }
 
 /// System-wide settings

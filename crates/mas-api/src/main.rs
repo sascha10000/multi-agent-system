@@ -55,8 +55,20 @@ struct Args {
     debug: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Build a custom tokio runtime with larger worker thread stacks.
+    // The default 2 MB stack overflows when deeply-nested async futures
+    // are involved (agent routing → forwarding → MCP client calls).
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024) // 8 MB
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Initialize tracing

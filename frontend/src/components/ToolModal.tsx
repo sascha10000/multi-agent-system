@@ -83,7 +83,7 @@ export default function ToolModal({
 
     // Validate JSON fields (body template only for HTTP)
     if (formData.endpointType === 'http' && !validateJson(formData.bodyTemplate, 'Body Template')) return;
-    if (!validateJson(formData.parameters, 'Parameters Schema')) return;
+    if (formData.endpointType !== 'mcp' && !validateJson(formData.parameters, 'Parameters Schema')) return;
 
     // MCP requires tool name
     if (formData.endpointType === 'mcp' && !formData.mcpToolName?.trim()) {
@@ -312,24 +312,26 @@ export default function ToolModal({
             </div>
           </div>
 
-          {/* Parameters Schema */}
-          <div className="pt-4 border-t border-zinc-700">
-            <h3 className="text-sm font-medium text-zinc-200 mb-3">Parameters Schema</h3>
+          {/* Parameters Schema (HTTP only — MCP servers advertise their own schema) */}
+          {formData.endpointType !== 'mcp' && (
+            <div className="pt-4 border-t border-zinc-700">
+              <h3 className="text-sm font-medium text-zinc-200 mb-3">Parameters Schema</h3>
 
-            <div>
-              <label className="block text-sm font-medium text-zinc-300 mb-1">
-                JSON Schema <span className="text-zinc-500 font-normal">(shown to LLM)</span>
-              </label>
-              <textarea
-                name="parameters"
-                value={formData.parameters}
-                onChange={handleChange}
-                rows={6}
-                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-none font-mono text-sm"
-                placeholder='{"type": "object", "properties": {...}}'
-              />
+              <div>
+                <label className="block text-sm font-medium text-zinc-300 mb-1">
+                  JSON Schema <span className="text-zinc-500 font-normal">(shown to LLM)</span>
+                </label>
+                <textarea
+                  name="parameters"
+                  value={formData.parameters}
+                  onChange={handleChange}
+                  rows={6}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-none font-mono text-sm"
+                  placeholder='{"type": "object", "properties": {...}}'
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Response Mapping */}
           <div className="pt-4 border-t border-zinc-700">

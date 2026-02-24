@@ -1,18 +1,22 @@
 //! Route handlers for the REST API
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
+use futures::stream::Stream;
 use mas_core::{
     agent_system::EchoHandler, load_system_from_json, validate_config, AgentBuilder, SendResult,
     StoredMessage, TraceCollector, TraceEventType,
 };
 use serde::Deserialize;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -23,7 +27,8 @@ use crate::models::{
     MessageResponse, PromptResult, RegisterSystemRequest, RegisterSystemResponse, SearchHit,
     SendPromptRequest, SendPromptResponse, SessionDetailResponse, SessionHistoryResponse,
     SessionPromptRequest, SessionPromptResponse, SessionSearchRequest, SessionSearchResponse,
-    SessionSummary, SystemDetailResponse, SystemSummary, UpdateSystemRequest, UpdateSystemResponse,
+    SessionSummary, SystemConfigResponse, SystemDetailResponse, SystemSummary,
+    UpdateSystemRequest, UpdateSystemResponse,
 };
 use crate::session::SessionError;
 use crate::state::{extract_metadata, AppState, SystemEntry};
@@ -153,6 +158,23 @@ pub async fn get_system(
         agent_count: metadata.agent_count,
         agents,
         global_timeout_secs: metadata.global_timeout_secs,
+        created_at,
+    }))
+}
+
+/// GET /api/v1/systems/{name}/config - Get the full system configuration
+pub async fn get_system_config(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<SystemConfigResponse>> {
+    let (config, created_at) = state
+        .get_system_config(&name)
+        .await
+        .ok_or_else(|| ApiError::SystemNotFound(name.clone()))?;
+
+    Ok(Json(SystemConfigResponse {
+        name,
+        config,
         created_at,
     }))
 }
@@ -728,6 +750,303 @@ pub async fn send_session_prompt(
         context: context_messages,
         trace,
     }))
+}
+
+/// POST /api/v1/sessions/{id}/prompt/stream - Send a prompt via SSE streaming
+///
+/// Streams trace events in real-time as agents process, then sends the final response.
+/// This avoids proxy timeouts for long-running LLM calls.
+pub async fn send_session_prompt_stream(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionPromptRequest>,
+) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let start = Instant::now();
+
+    // --- Validation (same as send_session_prompt) ---
+
+    let system_name = {
+        let manager = state.session_manager().read().await;
+        manager
+            .get_session_system(&session_id)
+            .ok_or_else(|| ApiError::BadRequest(format!("Session not found: {}", session_id)))?
+            .to_string()
+    };
+
+    let system = state
+        .get_system(&system_name)
+        .await
+        .ok_or_else(|| ApiError::SystemNotFound(system_name.clone()))?;
+
+    let (metadata, _) = state
+        .get_system_metadata(&system_name)
+        .await
+        .ok_or_else(|| ApiError::SystemNotFound(system_name.clone()))?;
+
+    let target_agent = match request.target_agent {
+        Some(ref agent_name) => {
+            if !metadata.agent_names.contains(agent_name) {
+                return Err(ApiError::AgentNotFound(format!(
+                    "Agent '{}' not found in system '{}'. Available agents: {:?}",
+                    agent_name, system_name, metadata.agent_names
+                )));
+            }
+            agent_name.clone()
+        }
+        None => metadata
+            .agents
+            .iter()
+            .find(|a| a.name == "Coordinator")
+            .or_else(|| metadata.agents.iter().find(|a| a.routing))
+            .or_else(|| metadata.agents.first())
+            .map(|a| a.name.clone())
+            .ok_or_else(|| ApiError::Internal("No agents available in system".to_string()))?,
+    };
+
+    // Get conversation history context
+    let mut context_messages = Vec::new();
+    let mut history_context = String::new();
+
+    if request.include_context && request.context_limit > 0 {
+        let manager = state.session_manager().read().await;
+        if let Ok(history) = manager.get_history(&session_id, Some(request.context_limit)) {
+            if !history.is_empty() {
+                history_context.push_str("<conversation_history>\n");
+                for msg in &history {
+                    let role = if msg.from == "user" { "User" } else { &msg.from };
+                    history_context.push_str(&format!("{}: {}\n", role, msg.content));
+                }
+                history_context.push_str("</conversation_history>\n\n");
+            }
+            context_messages = history.into_iter().map(|m| stored_to_response(&m)).collect();
+        }
+    }
+
+    // Store the user message
+    {
+        let mut manager = state.session_manager().write().await;
+        manager
+            .store_user_message(&session_id, &target_agent, &request.content)
+            .await
+            .map_err(session_to_api_error)?;
+    }
+
+    let full_message = if history_context.is_empty() {
+        request.content.clone()
+    } else {
+        format!("{}Current message: {}", history_context, request.content)
+    };
+
+    info!(
+        "SSE streaming prompt to session '{}' system '{}' agent '{}': {}",
+        session_id,
+        system_name,
+        target_agent,
+        &request.content[..request.content.len().min(50)]
+    );
+
+    // Create trace collector and subscribe BEFORE spawning work
+    let trace_collector = TraceCollector::new();
+    let mut trace_rx = trace_collector.subscribe();
+
+    // Register temporary user agent
+    let user_name = format!("_ApiUser_{}", Uuid::new_v4());
+    let user = AgentBuilder::new(&user_name)
+        .blocking_connection(&target_agent)
+        .build();
+
+    system
+        .register_agent(user, Arc::new(EchoHandler))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create user agent: {}", e)))?;
+
+    let message_id = Uuid::new_v4();
+
+    // Channel for SSE payloads
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    // Capture values for the background task
+    let task_content = request.content.clone();
+    let task_target = target_agent.clone();
+    let task_session_id = session_id.clone();
+
+    // Spawn the work + trace forwarding in one task
+    tokio::spawn(async move {
+        // Spawn the actual agent work
+        let work_trace = trace_collector.clone();
+        let work_system = system.clone();
+        let work_user = user_name.clone();
+        let work_target = task_target.clone();
+        let work_msg = full_message;
+
+        let work = tokio::spawn(async move {
+            work_system
+                .send_message_with_trace(&work_user, &work_target, &work_msg, work_trace)
+                .await
+        });
+
+        tokio::pin!(work);
+
+        // Forward trace events until work completes
+        loop {
+            tokio::select! {
+                biased;
+                event = trace_rx.recv() => {
+                    match event {
+                        Ok(trace_event) => {
+                            let step = AgentTraceStep {
+                                from: trace_event.from.clone(),
+                                to: trace_event.to.clone(),
+                                content: trace_event.content.clone(),
+                                step_type: match trace_event.event_type {
+                                    TraceEventType::Request => "request".to_string(),
+                                    TraceEventType::Response => "response".to_string(),
+                                    TraceEventType::Forward => "forward".to_string(),
+                                    TraceEventType::Synthesis => "synthesis".to_string(),
+                                },
+                            };
+                            if let Ok(json) = serde_json::to_string(&step) {
+                                let event = Event::default().event("trace").data(json);
+                                if tx.send(Ok(event)).await.is_err() {
+                                    return; // client disconnected
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("SSE trace receiver lagged by {} events", n);
+                            continue;
+                        }
+                        Err(_) => break, // channel closed
+                    }
+                }
+                result = &mut work => {
+                    // Drain any remaining trace events
+                    while let Ok(trace_event) = trace_rx.try_recv() {
+                        let step = AgentTraceStep {
+                            from: trace_event.from.clone(),
+                            to: trace_event.to.clone(),
+                            content: trace_event.content.clone(),
+                            step_type: match trace_event.event_type {
+                                TraceEventType::Request => "request".to_string(),
+                                TraceEventType::Response => "response".to_string(),
+                                TraceEventType::Forward => "forward".to_string(),
+                                TraceEventType::Synthesis => "synthesis".to_string(),
+                            },
+                        };
+                        if let Ok(json) = serde_json::to_string(&step) {
+                            let event = Event::default().event("trace").data(json);
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                    }
+
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+                    match result {
+                        Ok(Ok(send_result)) => {
+                            // Build trace from collector
+                            let mut trace = vec![AgentTraceStep {
+                                from: "User".to_string(),
+                                to: task_target.clone(),
+                                content: task_content.clone(),
+                                step_type: "request".to_string(),
+                            }];
+
+                            let trace_events = trace_collector.events().await;
+                            for te in &trace_events {
+                                trace.push(AgentTraceStep {
+                                    from: te.from.clone(),
+                                    to: te.to.clone(),
+                                    content: te.content.clone(),
+                                    step_type: match te.event_type {
+                                        TraceEventType::Request => "request".to_string(),
+                                        TraceEventType::Response => "response".to_string(),
+                                        TraceEventType::Forward => "forward".to_string(),
+                                        TraceEventType::Synthesis => "synthesis".to_string(),
+                                    },
+                                });
+                            }
+
+                            let prompt_result = match &send_result {
+                                SendResult::Response(msg) => {
+                                    // Store the agent response
+                                    let mut manager = state.session_manager().write().await;
+                                    let meta = serde_json::json!({ "elapsed_ms": elapsed_ms });
+                                    let _ = manager
+                                        .store_agent_response(
+                                            &task_session_id,
+                                            &msg.from,
+                                            &msg.content,
+                                            Some(meta),
+                                        )
+                                        .await;
+
+                                    trace.push(AgentTraceStep {
+                                        from: msg.from.clone(),
+                                        to: "User".to_string(),
+                                        content: msg.content.clone(),
+                                        step_type: "response".to_string(),
+                                    });
+
+                                    PromptResult::Response {
+                                        content: msg.content.clone(),
+                                        from: msg.from.clone(),
+                                    }
+                                }
+                                SendResult::Timeout(err) => {
+                                    trace.push(AgentTraceStep {
+                                        from: task_target.clone(),
+                                        to: "User".to_string(),
+                                        content: format!("Timeout: {}", err),
+                                        step_type: "response".to_string(),
+                                    });
+                                    PromptResult::Timeout {
+                                        message: err.to_string(),
+                                    }
+                                }
+                                SendResult::Notified => PromptResult::Notified,
+                            };
+
+                            let response = SessionPromptResponse {
+                                message_id,
+                                session_id: task_session_id,
+                                target_agent: task_target,
+                                result: prompt_result,
+                                elapsed_ms,
+                                context: context_messages,
+                                trace,
+                            };
+
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let event = Event::default().event("complete").data(json);
+                                let _ = tx.send(Ok(event)).await;
+                            }
+                        }
+                        Ok(Err(agent_err)) => {
+                            let err_json = serde_json::json!({ "error": agent_err.to_string() });
+                            let event = Event::default()
+                                .event("error")
+                                .data(err_json.to_string());
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        Err(join_err) => {
+                            let err_json = serde_json::json!({ "error": format!("Task failed: {}", join_err) });
+                            let event = Event::default()
+                                .event("error")
+                                .data(err_json.to_string());
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx);
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+    ))
 }
 
 /// POST /api/v1/sessions/{id}/build-index - Build the search index for a session
