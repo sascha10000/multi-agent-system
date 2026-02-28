@@ -10,6 +10,7 @@ import type {
   MessageResponse,
   AgentTraceStep,
 } from '../types/api';
+import { authFetch } from '../lib/auth';
 
 interface ChatMessage {
   id: string;
@@ -307,7 +308,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const fetchSessions = useCallback(async () => {
     setSessionsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/sessions?system_name=${encodeURIComponent(systemName)}`);
+      const res = await authFetch(`${API_BASE}/sessions?system_name=${encodeURIComponent(systemName)}`);
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         throw new Error(extractErrorMessage(errorData, 'Failed to fetch sessions'));
@@ -336,7 +337,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     setCurrentView('chat');
 
     try {
-      const res = await fetch(`${API_BASE}/sessions/${id}/history`);
+      const res = await authFetch(`${API_BASE}/sessions/${id}/history`);
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         throw new Error(extractErrorMessage(errorData, 'Failed to load session'));
@@ -387,7 +388,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
   const deleteSession = useCallback(async (id: string) => {
     setDeletingSessionId(id);
     try {
-      const res = await fetch(`${API_BASE}/sessions/${id}`, {
+      const res = await authFetch(`${API_BASE}/sessions/${id}`, {
         method: 'DELETE',
       });
       if (!res.ok) {
@@ -420,7 +421,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     try {
       await Promise.all(
         sessions.map((s) =>
-          fetch(`${API_BASE}/sessions/${s.id}`, { method: 'DELETE' })
+          authFetch(`${API_BASE}/sessions/${s.id}`, { method: 'DELETE' })
         )
       );
       setSessions([]);
@@ -451,7 +452,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
 
     try {
       // First, try to register the system (or update if it exists)
-      const registerRes = await fetch(`${API_BASE}/systems`, {
+      const registerRes = await authFetch(`${API_BASE}/systems`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: systemName, config }),
@@ -461,7 +462,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         const errorData = await registerRes.json().catch(() => ({}));
         // If system already exists, try to update it
         if (registerRes.status === 409) {
-          const updateRes = await fetch(`${API_BASE}/systems/${encodeURIComponent(systemName)}`, {
+          const updateRes = await authFetch(`${API_BASE}/systems/${encodeURIComponent(systemName)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config }),
@@ -478,7 +479,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
       setStatus('creating_session');
 
       // Create a new session
-      const sessionRes = await fetch(`${API_BASE}/sessions`, {
+      const sessionRes = await authFetch(`${API_BASE}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ system_name: systemName }),
@@ -547,7 +548,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     ]);
 
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}/prompt/stream`, {
+      const res = await authFetch(`${API_BASE}/sessions/${sessionId}/prompt/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

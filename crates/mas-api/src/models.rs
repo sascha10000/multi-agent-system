@@ -12,6 +12,9 @@ pub struct RegisterSystemRequest {
     pub name: String,
     /// The JSON configuration for the multi-agent system
     pub config: SystemConfigJson,
+    /// Optional organization ID to associate this system with
+    #[serde(default)]
+    pub org_id: Option<String>,
 }
 
 /// Response after successfully registering a system

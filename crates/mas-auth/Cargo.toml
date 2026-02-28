@@ -1,0 +1,29 @@
+[package]
+name = "mas-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Authentication and organization management for the Multi-Agent System"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Web framework (for middleware extractor)
+axum = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

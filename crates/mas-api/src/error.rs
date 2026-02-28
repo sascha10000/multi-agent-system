@@ -38,6 +38,14 @@ pub enum ApiError {
     /// Request parsing error
     #[error("Invalid request: {0}")]
     BadRequest(String),
+
+    /// Authentication required
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+
+    /// Insufficient permissions
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 }
 
 /// JSON error response body
@@ -57,6 +65,8 @@ impl IntoResponse for ApiError {
             ApiError::AgentSystemError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "AGENT_SYSTEM_ERROR"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
+            ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
         };
 
         let body = ErrorResponse {

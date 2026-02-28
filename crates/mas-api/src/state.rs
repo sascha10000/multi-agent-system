@@ -1,8 +1,10 @@
 //! Application state management
 
 use chrono::{DateTime, Utc};
+use mas_auth::{AuthState, FromRef, JwtConfig};
 use mas_core::config_loader::SystemConfigJson;
 use mas_core::{load_system_from_json, AgentSystem};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -243,6 +245,22 @@ pub struct AppState {
     session_manager: SharedSessionManager,
     /// System store for persisting configurations
     system_store: SystemStore,
+    /// Database connection pool
+    db: Option<SqlitePool>,
+    /// JWT configuration
+    jwt_config: Arc<JwtConfig>,
+    /// Whether auth is disabled (dev mode)
+    auth_disabled: bool,
+}
+
+/// Implement FromRef so the AuthenticatedUser extractor can pull AuthState from AppState
+impl FromRef<AppState> for AuthState {
+    fn from_ref(state: &AppState) -> AuthState {
+        AuthState {
+            jwt_config: state.jwt_config.clone(),
+            auth_disabled: state.auth_disabled,
+        }
+    }
 }
 
 impl Default for AppState {
@@ -262,16 +280,58 @@ impl AppState {
 
     /// Create a new application state with custom paths
     pub fn with_paths(sessions_path: PathBuf, systems_path: PathBuf) -> Self {
+        let auth_disabled = std::env::var("MAS_DISABLE_AUTH")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         Self {
             systems: Arc::new(RwLock::new(HashMap::new())),
             session_manager: create_session_manager(sessions_path),
             system_store: SystemStore::new(systems_path),
+            db: None,
+            jwt_config: Arc::new(JwtConfig::for_testing()),
+            auth_disabled,
         }
     }
 
     /// Create a new application state with a custom sessions path (legacy compatibility)
     pub fn with_sessions_path(sessions_path: PathBuf) -> Self {
         Self::with_paths(sessions_path, PathBuf::from("data/systems"))
+    }
+
+    /// Set the database pool
+    pub fn with_db(mut self, pool: SqlitePool) -> Self {
+        self.db = Some(pool);
+        self
+    }
+
+    /// Set the JWT configuration
+    pub fn with_jwt_config(mut self, config: JwtConfig) -> Self {
+        self.jwt_config = Arc::new(config);
+        self
+    }
+
+    /// Set whether auth is disabled
+    pub fn with_auth_disabled(mut self, disabled: bool) -> Self {
+        self.auth_disabled = disabled;
+        self
+    }
+
+    /// Get the database pool
+    pub fn db(&self) -> &SqlitePool {
+        self.db
+            .as_ref()
+            .expect("Database pool not initialized. Call with_db() first.")
+    }
+
+    /// Get the JWT config
+    pub fn jwt_config(&self) -> &JwtConfig {
+        &self.jwt_config
+    }
+
+    /// Whether auth is disabled (dev mode)
+    pub fn is_auth_disabled(&self) -> bool {
+        self.auth_disabled
     }
 
     /// Get the session manager

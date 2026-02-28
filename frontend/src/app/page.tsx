@@ -24,6 +24,10 @@ import ToolNode from '../components/ToolNode';
 import ToolModal from '../components/ToolModal';
 import ChatPanel from '../components/ChatPanel';
 import SystemsOverview from '../components/SystemsOverview';
+import AuthGuard from '../components/AuthGuard';
+import OrgSwitcher from '../components/OrgSwitcher';
+import OrgManagement from '../components/OrgManagement';
+import { authFetch, logout, getActiveOrg, type AuthUser } from '../lib/auth';
 import type {
   AgentNodeData,
   ToolNodeData,
@@ -142,13 +146,25 @@ function configToNodesAndEdges(config: SystemConfigJson): {
   return { nodes: [...agentNodes, ...toolNodes], edges: newEdges };
 }
 
-export default function EditorPage() {
+export default function Page() {
+  return (
+    <AuthGuard>
+      {(user) => <EditorPage user={user} />}
+    </AuthGuard>
+  );
+}
+
+function EditorPage({ user }: { user: AuthUser }) {
   // View state: overview (dashboard) vs editor (ReactFlow)
   const [currentView, setCurrentView] = useState<'overview' | 'editor'>('overview');
   const [currentSystemName, setCurrentSystemName] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [saving, setSaving] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // Org state
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(getActiveOrg());
+  const [managingOrgId, setManagingOrgId] = useState<string | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([] as Node<AgentNodeData | ToolNodeData>[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([] as Edge[]);
@@ -497,11 +513,11 @@ export default function EditorPage() {
     try {
       // If renamed, delete the old system first
       if (oldName && oldName !== name) {
-        await fetch(`${API_BASE}/systems/${encodeURIComponent(oldName)}`, { method: 'DELETE' }).catch(() => {});
+        await authFetch(`${API_BASE}/systems/${encodeURIComponent(oldName)}`, { method: 'DELETE' }).catch(() => {});
       }
 
       // Try PUT first (update existing), fall back to POST (create new)
-      const updateRes = await fetch(`${API_BASE}/systems/${encodeURIComponent(name)}`, {
+      const updateRes = await authFetch(`${API_BASE}/systems/${encodeURIComponent(name)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config }),
@@ -514,10 +530,14 @@ export default function EditorPage() {
 
       if (updateRes.status === 404) {
         // System doesn't exist yet, create it
-        const createRes = await fetch(`${API_BASE}/systems`, {
+        const createBody: Record<string, unknown> = { name, config };
+        if (activeOrgId) {
+          createBody.org_id = activeOrgId;
+        }
+        const createRes = await authFetch(`${API_BASE}/systems`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, config }),
+          body: JSON.stringify(createBody),
         });
 
         if (!createRes.ok) {
@@ -536,7 +556,7 @@ export default function EditorPage() {
     } finally {
       setSaving(false);
     }
-  }, [exportConfig, currentSystemName]);
+  }, [exportConfig, currentSystemName, activeOrgId]);
 
   // Back to overview
   const handleBackToOverview = useCallback(() => {
@@ -564,11 +584,46 @@ export default function EditorPage() {
     return (
       <>
         {fileInput}
+        {/* User bar */}
+        <div className="bg-zinc-950 border-b border-zinc-800 px-6 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <OrgSwitcher onOrgChange={(id) => setActiveOrgId(id)} />
+            {activeOrgId && (
+              <button
+                onClick={() => setManagingOrgId(activeOrgId)}
+                className="p-1.5 text-zinc-500 hover:text-zinc-300 rounded-md hover:bg-zinc-800 transition-colors"
+                title="Manage organization"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-zinc-400">{user.display_name}</span>
+            <button
+              onClick={logout}
+              className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
         <SystemsOverview
           onSelectSystem={handleSelectSystem}
           onNewSystem={handleNewSystem}
           onImportJson={triggerImport}
+          orgId={activeOrgId}
         />
+        {/* Org Management Modal */}
+        {managingOrgId && (
+          <OrgManagement
+            orgId={managingOrgId}
+            onClose={() => setManagingOrgId(null)}
+          />
+        )}
       </>
     );
   }

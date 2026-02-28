@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { SystemConfigJson } from '../types/agent';
 import type { SystemSummary, ListSystemsResponse, SystemConfigResponse } from '../types/api';
+import { authFetch } from '../lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
 
@@ -10,9 +11,10 @@ interface SystemsOverviewProps {
   onSelectSystem: (name: string, config: SystemConfigJson) => void;
   onNewSystem: () => void;
   onImportJson: () => void;
+  orgId?: string | null;
 }
 
-export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJson }: SystemsOverviewProps) {
+export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJson, orgId }: SystemsOverviewProps) {
   const [systems, setSystems] = useState<SystemSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +25,8 @@ export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJ
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/systems`);
+      const url = orgId ? `${API_BASE}/systems?org_id=${encodeURIComponent(orgId)}` : `${API_BASE}/systems`;
+      const res = await authFetch(url);
       if (!res.ok) throw new Error('Failed to fetch systems');
       const data: ListSystemsResponse = await res.json();
       // Sort by created_at descending
@@ -37,7 +40,7 @@ export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJ
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [orgId]);
 
   useEffect(() => {
     fetchSystems();
@@ -47,7 +50,7 @@ export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJ
     setOpeningName(name);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/systems/${encodeURIComponent(name)}/config`);
+      const res = await authFetch(`${API_BASE}/systems/${encodeURIComponent(name)}/config`);
       if (!res.ok) throw new Error(`Failed to load system "${name}"`);
       const data: SystemConfigResponse = await res.json();
       onSelectSystem(name, data.config);
@@ -62,7 +65,7 @@ export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJ
     if (!confirm(`Delete system "${name}"? This cannot be undone.`)) return;
     setDeletingName(name);
     try {
-      const res = await fetch(`${API_BASE}/systems/${encodeURIComponent(name)}`, {
+      const res = await authFetch(`${API_BASE}/systems/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error(`Failed to delete system "${name}"`);
