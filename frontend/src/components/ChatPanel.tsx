@@ -33,11 +33,11 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
 
 function getStepTypeColor(stepType: string) {
   switch (stepType) {
-    case 'request': return 'text-blue-400 bg-blue-900/30';
-    case 'response': return 'text-green-400 bg-green-900/30';
-    case 'forward': return 'text-amber-400 bg-amber-900/30';
-    case 'synthesis': return 'text-purple-400 bg-purple-900/30';
-    default: return 'text-zinc-400 bg-zinc-700';
+    case 'request': return 'text-blue-300 bg-blue-500/15 border-blue-500/25';
+    case 'response': return 'text-emerald-300 bg-emerald-500/15 border-emerald-500/25';
+    case 'forward': return 'text-amber-300 bg-amber-500/15 border-amber-500/25';
+    case 'synthesis': return 'text-purple-300 bg-purple-500/15 border-purple-500/25';
+    default: return 'text-zinc-400 bg-zinc-700/50 border-zinc-600/40';
   }
 }
 
@@ -131,11 +131,11 @@ const VerboseTraceStep = memo(function VerboseTraceStep({
 }) {
   const getColor = (t: string) => {
     switch (t) {
-      case 'request': return 'text-blue-400 bg-blue-900/30';
-      case 'response': return 'text-green-400 bg-green-900/30';
-      case 'forward': return 'text-amber-400 bg-amber-900/30';
-      case 'synthesis': return 'text-purple-400 bg-purple-900/30';
-      default: return 'text-zinc-400 bg-zinc-700';
+      case 'request': return 'text-blue-300 bg-blue-500/15 border-blue-500/25';
+      case 'response': return 'text-emerald-300 bg-emerald-500/15 border-emerald-500/25';
+      case 'forward': return 'text-amber-300 bg-amber-500/15 border-amber-500/25';
+      case 'synthesis': return 'text-purple-300 bg-purple-500/15 border-purple-500/25';
+      default: return 'text-zinc-400 bg-zinc-700/50 border-zinc-600/40';
     }
   };
   const getIcon = (t: string) => {
@@ -160,7 +160,7 @@ const VerboseTraceStep = memo(function VerboseTraceStep({
           : 'bg-emerald-950/40 border-emerald-800/40'
       }`}>
         <div className="flex items-center gap-2 mb-1">
-          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${getColor(step.step_type)}`}>
+          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-semibold uppercase tracking-wide ${getColor(step.step_type)}`}>
             {getIcon(step.step_type)} {step.step_type}
           </span>
           <span className="text-xs text-zinc-400">
@@ -517,13 +517,14 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
     }
   }, [isOpen, currentView, fetchSessions]);
 
-  const sendMessage = async () => {
-    if (!input.trim() || !sessionId || isLoading) return;
+  const sendMessage = async (contentOverride?: string) => {
+    const content = contentOverride || input.trim();
+    if (!content || !sessionId || isLoading) return;
 
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
-      content: input.trim(),
+      content,
       timestamp: new Date(),
     };
 
@@ -552,7 +553,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: userMessage.content,
+          content,
           include_context: true,
           context_limit: 5,
         }),
@@ -967,6 +968,40 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
           </div>
         )}
 
+        {/* ===== Welcome Message (shown when no messages yet) ===== */}
+        {status === 'ready' && messages.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-8 px-4 max-w-lg mx-auto">
+            <div className="w-12 h-12 rounded-xl bg-blue-500/15 flex items-center justify-center mb-4 border border-blue-500/20">
+              <svg className="w-6 h-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+            </div>
+            <h3 className="text-zinc-100 font-semibold text-base mb-1">{systemName}</h3>
+            <p className="text-zinc-400 text-sm text-center mb-6">
+              {config.agents.length > 0
+                ? `${config.agents.length} agent${config.agents.length !== 1 ? 's' : ''} ready — ${config.agents.map(a => a.name).join(', ')}`
+                : 'Start a conversation below'}
+            </p>
+            <div className="w-full space-y-2">
+              <p className="text-zinc-500 text-xs font-medium uppercase tracking-wide mb-2">Suggested prompts</p>
+              {[
+                'What can you help me with?',
+                'Walk me through how you work',
+                'I have a question — can you ask me for details first?',
+              ].map((starter) => (
+                <button
+                  key={starter}
+                  onClick={() => sendMessage(starter)}
+                  disabled={isLoading}
+                  className="w-full text-left px-3 py-2.5 text-sm text-zinc-300 bg-zinc-800/60 hover:bg-zinc-700/60 border border-zinc-700/50 hover:border-zinc-600 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {starter}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* ===== Normal Mode ===== */}
         {!verboseMode && messages.map((msg) => (
           <div key={msg.id}>
@@ -1012,7 +1047,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
               className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-zinc-100 placeholder-zinc-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:opacity-50"
             />
             <button
-              onClick={sendMessage}
+              onClick={() => sendMessage()}
               disabled={!input.trim() || status !== 'ready' || isLoading}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
@@ -1037,7 +1072,7 @@ export default function ChatPanel({ isOpen, onClose, config, systemName }: ChatP
             {/* Modal Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700 bg-zinc-800 rounded-t-lg">
               <div className="flex items-center gap-3">
-                <span className={`px-2 py-1 rounded text-xs font-medium ${getStepTypeColor(selectedTraceStep.step_type)}`}>
+                <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs font-semibold uppercase tracking-wide ${getStepTypeColor(selectedTraceStep.step_type)}`}>
                   {getStepTypeIcon(selectedTraceStep.step_type)} {selectedTraceStep.step_type}
                 </span>
                 <span className="text-zinc-300">

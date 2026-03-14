@@ -229,13 +229,14 @@ export default function SystemsOverview({ onSelectSystem, onNewSystem, onImportJ
                   {system.agents.slice(0, 5).map((agentName) => (
                     <span
                       key={agentName}
-                      className="px-2 py-0.5 text-xs font-medium bg-zinc-800 text-zinc-300 rounded-full border border-zinc-700"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-zinc-800/80 text-zinc-300 rounded-md border border-zinc-700/60"
                     >
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400/60 flex-shrink-0" />
                       {agentName}
                     </span>
                   ))}
                   {system.agents.length > 5 && (
-                    <span className="px-2 py-0.5 text-xs text-zinc-500">
+                    <span className="inline-flex items-center px-2 py-0.5 text-[11px] text-zinc-500 font-medium">
                       +{system.agents.length - 5} more
                     </span>
                   )}
