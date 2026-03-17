@@ -16,7 +16,9 @@ function AgentNode({ data, selected }: AgentNodeProps) {
         bg-zinc-900/95 backdrop-blur-sm
         ${selected
           ? 'border-blue-500/70 shadow-blue-500/10 ring-1 ring-blue-500/20'
-          : 'border-zinc-700/60 hover:border-zinc-600'}
+          : data.entryPoint
+            ? 'border-green-500/50 hover:border-green-400/60'
+            : 'border-zinc-700/60 hover:border-zinc-600'}
         hover:shadow-xl
       `}
     >
@@ -40,27 +42,31 @@ function AgentNode({ data, selected }: AgentNodeProps) {
               {data.name}
             </h3>
           </div>
-          {data.routing && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold bg-purple-500/15 text-purple-300 rounded-md border border-purple-500/20">
-              <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-              </svg>
-              Router
-            </span>
-          )}
+          <div className="flex items-center gap-1">
+            {data.entryPoint && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold bg-green-500/15 text-green-300 rounded-md border border-green-500/20">
+                <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+                Entry
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
       {/* Body */}
       <div className="px-3 py-2">
-        {data.routing && (
-          <div className="flex items-center gap-1.5 mb-1">
-            <span className="text-[10px] text-zinc-500">Behavior</span>
-            <span className="text-[10px] text-zinc-300 font-medium bg-zinc-800 px-1.5 py-0.5 rounded">
-              {data.routingBehavior}
+        <div className="flex items-center gap-1.5 mb-1">
+          <span className="text-[10px] text-zinc-300 font-medium bg-zinc-800 px-1.5 py-0.5 rounded">
+            {data.routingBehavior}
+          </span>
+          {data.maxTurns !== 1 && (
+            <span className="text-[10px] text-zinc-400 font-medium bg-zinc-800 px-1.5 py-0.5 rounded">
+              {data.maxTurns === 0 ? '∞' : data.maxTurns} turns
             </span>
-          </div>
-        )}
+          )}
+        </div>
         <p className="text-[10px] text-zinc-500 font-mono truncate">
           {data.model}
         </p>

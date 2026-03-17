@@ -14,6 +14,7 @@ export interface HandlerConfig {
     temperature?: number;
     max_tokens?: number;
   };
+  max_turns?: number;
 }
 
 export interface ConnectionConfig {
@@ -26,6 +27,7 @@ export interface AgentConfig {
   system_prompt?: string;
   handler?: HandlerConfig;
   connections?: Record<string, ConnectionConfig>;
+  entry_point?: boolean;
 }
 
 export interface LlmProviderConfig {
@@ -72,11 +74,25 @@ export interface ToolConfig {
   timeout_secs?: number;
 }
 
+// Database configuration types (matching Rust database.rs)
+export type DatabaseType = 'sqlite' | 'postgres' | 'mysql';
+
+export interface DatabaseConfig {
+  name: string;
+  description: string;
+  connection_string: string;
+  database_type?: DatabaseType;
+  max_connections?: number;
+  timeout_secs?: number;
+  read_only?: boolean;
+}
+
 export interface SystemConfigJson {
   system?: SystemSettings;
   llm_providers?: Record<string, LlmProviderConfig>;
   agents: AgentConfig[];
   tools?: ToolConfig[];
+  databases?: DatabaseConfig[];
   editor_metadata?: {
     node_positions?: Record<string, { x: number; y: number }>;
   };
@@ -94,6 +110,8 @@ export interface AgentNodeData {
   routingBehavior: RoutingBehavior;
   temperature: number;
   maxTokens: number;
+  entryPoint: boolean;
+  maxTurns: number;
 }
 
 // Tool node data for React Flow
@@ -123,6 +141,60 @@ export const defaultAgentData: AgentNodeData = {
   routingBehavior: 'best',
   temperature: 0.7,
   maxTokens: 1000,
+  entryPoint: false,
+  maxTurns: 1,
+};
+
+// Database node data for React Flow
+export interface DatabaseNodeData {
+  [key: string]: unknown;
+  name: string;
+  description: string;
+  databaseType: DatabaseType;
+  connectionString: string;
+  maxConnections: number;
+  timeoutSecs: number;
+  readOnly: boolean;
+}
+
+// Default values for new databases
+export const defaultDatabaseData: DatabaseNodeData = {
+  name: 'New Database',
+  description: 'A database connection',
+  databaseType: 'sqlite',
+  connectionString: 'sqlite://data.db',
+  maxConnections: 5,
+  timeoutSecs: 30,
+  readOnly: true,
+};
+
+// REST API node data for React Flow (simplified HTTP tool)
+export interface RestApiNodeData {
+  [key: string]: unknown;
+  name: string;
+  description: string;
+  endpointUrl: string;
+  endpointMethod: HttpMethod;
+  headers: Record<string, string>;
+  bodyTemplate: string; // JSON string for the body template
+  parameters: string; // JSON string for the parameters schema
+  extractPath: string;
+  responseFormat: ResponseFormat;
+  timeoutSecs: number;
+}
+
+// Default values for new REST API nodes
+export const defaultRestApiData: RestApiNodeData = {
+  name: 'New REST API',
+  description: 'A REST API endpoint',
+  endpointUrl: 'https://api.example.com/endpoint',
+  endpointMethod: 'GET',
+  headers: {},
+  bodyTemplate: '',
+  parameters: '{\n  "type": "object",\n  "properties": {}\n}',
+  extractPath: '',
+  responseFormat: 'json',
+  timeoutSecs: 30,
 };
 
 // Default values for new tools (MCP by default)

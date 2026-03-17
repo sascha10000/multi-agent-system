@@ -350,7 +350,8 @@ pub async fn send_session_prompt(
         None => metadata
             .agents
             .iter()
-            .find(|a| a.name == "Coordinator")
+            .find(|a| a.entry_point)
+            .or_else(|| metadata.agents.iter().find(|a| a.name == "Coordinator"))
             .or_else(|| metadata.agents.iter().find(|a| a.routing))
             .or_else(|| metadata.agents.first())
             .map(|a| a.name.clone())
@@ -536,7 +537,8 @@ pub async fn send_session_prompt_stream(
         None => metadata
             .agents
             .iter()
-            .find(|a| a.name == "Coordinator")
+            .find(|a| a.entry_point)
+            .or_else(|| metadata.agents.iter().find(|a| a.name == "Coordinator"))
             .or_else(|| metadata.agents.iter().find(|a| a.routing))
             .or_else(|| metadata.agents.first())
             .map(|a| a.name.clone())

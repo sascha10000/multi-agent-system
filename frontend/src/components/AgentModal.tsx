@@ -200,39 +200,57 @@ export default function AgentModal({
             </div>
           </div>
 
-          {/* Routing Settings */}
+          {/* Chat & Routing Settings */}
           <div className="pt-4 border-t border-zinc-700">
-            <h3 className="text-sm font-medium text-zinc-200 mb-3">Routing</h3>
+            <h3 className="text-sm font-medium text-zinc-200 mb-3">Chat & Routing</h3>
 
             <div className="space-y-3">
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
-                  name="routing"
-                  checked={formData.routing}
+                  name="entryPoint"
+                  checked={formData.entryPoint}
                   onChange={handleChange}
-                  className="w-4 h-4 text-blue-500 bg-zinc-800 border-zinc-600 rounded focus:ring-blue-500"
+                  className="w-4 h-4 text-green-500 bg-zinc-800 border-zinc-600 rounded focus:ring-green-500"
                 />
-                <span className="text-sm text-zinc-300">Enable routing</span>
+                <div>
+                  <span className="text-sm text-zinc-300">Entry point</span>
+                  <p className="text-xs text-zinc-500">Chat messages are sent to this agent</p>
+                </div>
               </label>
 
-              {formData.routing && (
-                <div>
-                  <label className="block text-sm font-medium text-zinc-300 mb-1">
-                    Routing Behavior
-                  </label>
-                  <select
-                    name="routingBehavior"
-                    value={formData.routingBehavior}
-                    onChange={handleChange}
-                    className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                  >
-                    <option value="best">Best - Forward to most appropriate agent</option>
-                    <option value="all">All - Forward to all connected agents</option>
-                    <option value="direct_first">Direct First - Try to answer, then forward</option>
-                  </select>
-                </div>
-              )}
+              <div>
+                <label className="block text-sm font-medium text-zinc-300 mb-1">
+                  Routing Behavior
+                </label>
+                <select
+                  name="routingBehavior"
+                  value={formData.routingBehavior}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                >
+                  <option value="best">Best - Forward to most appropriate agent</option>
+                  <option value="all">All - Forward to all connected agents</option>
+                  <option value="direct_first">Direct First - Try to answer, then forward</option>
+                </select>
+                <p className="text-xs text-zinc-500 mt-1">Applies when agent has connections to other agents</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-300 mb-1">
+                  Max Turns <span className="text-zinc-500 font-normal">(0 = unlimited)</span>
+                </label>
+                <input
+                  type="number"
+                  name="maxTurns"
+                  value={formData.maxTurns}
+                  onChange={handleChange}
+                  min="0"
+                  max="100"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+                <p className="text-xs text-zinc-500 mt-1">How many follow-up rounds with other agents (1 = single exchange)</p>
+              </div>
             </div>
           </div>
 

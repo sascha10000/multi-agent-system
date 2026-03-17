@@ -34,6 +34,7 @@ pub struct AgentMetadata {
     pub routing: bool,
     pub routing_behavior: Option<String>,
     pub connections: Vec<ConnectionMetadata>,
+    pub entry_point: bool,
 }
 
 /// Stored metadata for a connection
@@ -69,6 +70,7 @@ pub fn extract_metadata(config: &SystemConfigJson) -> ConfigMetadata {
                     None
                 },
                 connections,
+                entry_point: agent.entry_point,
             }
         })
         .collect();

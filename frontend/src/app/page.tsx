@@ -22,6 +22,10 @@ import AgentNode from '../components/AgentNode';
 import AgentModal from '../components/AgentModal';
 import ToolNode from '../components/ToolNode';
 import ToolModal from '../components/ToolModal';
+import RestApiNode from '../components/RestApiNode';
+import RestApiModal from '../components/RestApiModal';
+import DatabaseNode from '../components/DatabaseNode';
+import DatabaseModal from '../components/DatabaseModal';
 import ChatPanel from '../components/ChatPanel';
 import SystemsOverview from '../components/SystemsOverview';
 import AuthGuard from '../components/AuthGuard';
@@ -31,25 +35,29 @@ import { authFetch, logout, getActiveOrg, type AuthUser } from '../lib/auth';
 import type {
   AgentNodeData,
   ToolNodeData,
+  RestApiNodeData,
+  DatabaseNodeData,
   SystemConfigJson,
   AgentConfig,
   ToolConfig,
+  DatabaseConfig,
   RoutingBehavior,
   EndpointType,
+  DatabaseType,
 } from '../types/agent';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
 
 /** Convert a SystemConfigJson into ReactFlow nodes and edges, using saved positions when available */
 function configToNodesAndEdges(config: SystemConfigJson): {
-  nodes: Node<AgentNodeData | ToolNodeData>[];
+  nodes: Node<AgentNodeData | ToolNodeData | RestApiNodeData | DatabaseNodeData>[];
   edges: Edge[];
 } {
   const savedPositions = config.editor_metadata?.node_positions || {};
   const nameToId: Record<string, string> = {};
 
   // Calculate grid positions as fallback
-  const totalItems = config.agents.length + (config.tools?.length || 0);
+  const totalItems = config.agents.length + (config.tools?.length || 0) + (config.databases?.length || 0);
   const cols = Math.max(1, Math.ceil(Math.sqrt(totalItems)));
   const spacingX = 250;
   const spacingY = 200;
@@ -81,12 +89,25 @@ function configToNodesAndEdges(config: SystemConfigJson): {
         routingBehavior: (agent.handler?.routing_behavior as RoutingBehavior) || 'best',
         temperature: agent.handler?.options?.temperature ?? 0.7,
         maxTokens: agent.handler?.options?.max_tokens ?? 1000,
+        entryPoint: agent.entry_point || false,
+        maxTurns: agent.handler?.max_turns ?? 1,
       },
     };
   });
 
-  // Convert tools to nodes
-  const toolNodes: Node<ToolNodeData>[] = (config.tools || []).map((tool) => {
+  // Split tools into MCP tools vs REST API (HTTP) tools
+  const allTools = config.tools || [];
+  const mcpTools = allTools.filter((t) => {
+    const type = t.endpoint.type || (t.endpoint.mcp_tool_name ? 'mcp' : 'http');
+    return type === 'mcp';
+  });
+  const httpTools = allTools.filter((t) => {
+    const type = t.endpoint.type || (t.endpoint.mcp_tool_name ? 'mcp' : 'http');
+    return type !== 'mcp';
+  });
+
+  // Convert MCP tools to Tool nodes
+  const toolNodes: Node<ToolNodeData>[] = mcpTools.map((tool) => {
     const nodeId = `node-${tool.name}`;
     nameToId[tool.name] = nodeId;
 
@@ -94,8 +115,6 @@ function configToNodesAndEdges(config: SystemConfigJson): {
     const row = Math.floor(itemIndex / cols);
     const col = itemIndex % cols;
     itemIndex++;
-
-    const endpointType = tool.endpoint.type || (tool.endpoint.mcp_tool_name ? 'mcp' : 'http');
 
     return {
       id: nodeId,
@@ -106,7 +125,7 @@ function configToNodesAndEdges(config: SystemConfigJson): {
       data: {
         name: tool.name,
         description: tool.description,
-        endpointType: endpointType,
+        endpointType: 'mcp' as EndpointType,
         endpointUrl: tool.endpoint.url,
         endpointMethod: tool.endpoint.method || 'POST',
         mcpToolName: tool.endpoint.mcp_tool_name || '',
@@ -120,6 +139,69 @@ function configToNodesAndEdges(config: SystemConfigJson): {
         extractPath: tool.response_mapping?.extract_path || '',
         responseFormat: tool.response_mapping?.format || 'json',
         timeoutSecs: tool.timeout_secs || 30,
+      },
+    };
+  });
+
+  // Convert HTTP tools to REST API nodes
+  const restApiNodes: Node<RestApiNodeData>[] = httpTools.map((tool) => {
+    const nodeId = `node-${tool.name}`;
+    nameToId[tool.name] = nodeId;
+
+    const saved = savedPositions[tool.name];
+    const row = Math.floor(itemIndex / cols);
+    const col = itemIndex % cols;
+    itemIndex++;
+
+    return {
+      id: nodeId,
+      type: 'restapi',
+      position: saved
+        ? { x: saved.x, y: saved.y }
+        : { x: 100 + col * spacingX, y: 50 + row * spacingY },
+      data: {
+        name: tool.name,
+        description: tool.description,
+        endpointUrl: tool.endpoint.url,
+        endpointMethod: tool.endpoint.method || 'GET',
+        headers: tool.endpoint.headers || {},
+        bodyTemplate: tool.endpoint.body_template
+          ? JSON.stringify(tool.endpoint.body_template, null, 2)
+          : '',
+        parameters: tool.parameters
+          ? JSON.stringify(tool.parameters, null, 2)
+          : '{\n  "type": "object",\n  "properties": {}\n}',
+        extractPath: tool.response_mapping?.extract_path || '',
+        responseFormat: tool.response_mapping?.format || 'json',
+        timeoutSecs: tool.timeout_secs || 30,
+      },
+    };
+  });
+
+  // Convert databases to nodes
+  const databaseNodes: Node<DatabaseNodeData>[] = (config.databases || []).map((db) => {
+    const nodeId = `node-${db.name}`;
+    nameToId[db.name] = nodeId;
+
+    const saved = savedPositions[db.name];
+    const row = Math.floor(itemIndex / cols);
+    const col = itemIndex % cols;
+    itemIndex++;
+
+    return {
+      id: nodeId,
+      type: 'database',
+      position: saved
+        ? { x: saved.x, y: saved.y }
+        : { x: 100 + col * spacingX, y: 50 + row * spacingY },
+      data: {
+        name: db.name,
+        description: db.description || '',
+        databaseType: (db.database_type || 'sqlite') as DatabaseType,
+        connectionString: db.connection_string,
+        maxConnections: db.max_connections || 5,
+        timeoutSecs: db.timeout_secs || 30,
+        readOnly: db.read_only ?? true,
       },
     };
   });
@@ -143,7 +225,7 @@ function configToNodesAndEdges(config: SystemConfigJson): {
     }
   });
 
-  return { nodes: [...agentNodes, ...toolNodes], edges: newEdges };
+  return { nodes: [...agentNodes, ...toolNodes, ...restApiNodes, ...databaseNodes], edges: newEdges };
 }
 
 export default function Page() {
@@ -166,12 +248,14 @@ function EditorPage({ user }: { user: AuthUser }) {
   const [activeOrgId, setActiveOrgId] = useState<string | null>(getActiveOrg());
   const [managingOrgId, setManagingOrgId] = useState<string | null>(null);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState([] as Node<AgentNodeData | ToolNodeData>[]);
+  const [nodes, setNodes, onNodesChange] = useNodesState([] as Node<AgentNodeData | ToolNodeData | RestApiNodeData | DatabaseNodeData>[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([] as Edge[]);
 
-  // Modal state - separate for agents and tools
+  // Modal state - separate for agents, tools, REST APIs, and databases
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [toolModalOpen, setToolModalOpen] = useState(false);
+  const [restApiModalOpen, setRestApiModalOpen] = useState(false);
+  const [databaseModalOpen, setDatabaseModalOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Chat panel state
@@ -184,12 +268,16 @@ function EditorPage({ user }: { user: AuthUser }) {
   const nodeTypes: NodeTypes = useMemo(() => ({
     agent: AgentNode,
     tool: ToolNode,
+    restapi: RestApiNode,
+    database: DatabaseNode,
   }), []);
 
   // Get selected node
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedAgentData = selectedNode?.type === 'agent' ? selectedNode.data as AgentNodeData : null;
   const selectedToolData = selectedNode?.type === 'tool' ? selectedNode.data as ToolNodeData : null;
+  const selectedRestApiData = selectedNode?.type === 'restapi' ? selectedNode.data as RestApiNodeData : null;
+  const selectedDatabaseData = selectedNode?.type === 'database' ? selectedNode.data as DatabaseNodeData : null;
 
   // Handle new connections with validation
   const onConnect = useCallback(
@@ -197,6 +285,14 @@ function EditorPage({ user }: { user: AuthUser }) {
       const sourceNode = nodes.find((n) => n.id === connection.source);
       if (sourceNode?.type === 'tool') {
         console.warn('Tools cannot initiate connections');
+        return;
+      }
+      if (sourceNode?.type === 'restapi') {
+        console.warn('REST APIs cannot initiate connections');
+        return;
+      }
+      if (sourceNode?.type === 'database') {
+        console.warn('Databases cannot initiate connections');
         return;
       }
       setEdges((eds) => addEdge({ ...connection, animated: true }, eds));
@@ -210,6 +306,10 @@ function EditorPage({ user }: { user: AuthUser }) {
       setSelectedNodeId(node.id);
       if (node.type === 'tool') {
         setToolModalOpen(true);
+      } else if (node.type === 'restapi') {
+        setRestApiModalOpen(true);
+      } else if (node.type === 'database') {
+        setDatabaseModalOpen(true);
       } else {
         setAgentModalOpen(true);
       }
@@ -236,6 +336,8 @@ function EditorPage({ user }: { user: AuthUser }) {
         routingBehavior: 'best',
         temperature: 0.7,
         maxTokens: 1000,
+        entryPoint: false,
+        maxTurns: 1,
       },
     };
     setNodes((nds) => [...nds, newNode]);
@@ -273,6 +375,59 @@ function EditorPage({ user }: { user: AuthUser }) {
     setToolModalOpen(true);
   }, [setNodes]);
 
+  // Add new REST API
+  const addRestApi = useCallback(() => {
+    const newId = `restapi-${Date.now()}`;
+    const newNode: Node<RestApiNodeData> = {
+      id: newId,
+      type: 'restapi',
+      position: {
+        x: Math.random() * 300 + 100,
+        y: Math.random() * 200 + 100,
+      },
+      data: {
+        name: 'New REST API',
+        description: 'A REST API endpoint',
+        endpointUrl: 'https://api.example.com/endpoint',
+        endpointMethod: 'GET',
+        headers: {},
+        bodyTemplate: '',
+        parameters: '{\n  "type": "object",\n  "properties": {}\n}',
+        extractPath: '',
+        responseFormat: 'json',
+        timeoutSecs: 30,
+      },
+    };
+    setNodes((nds) => [...nds, newNode]);
+    setSelectedNodeId(newId);
+    setRestApiModalOpen(true);
+  }, [setNodes]);
+
+  // Add new database
+  const addDatabase = useCallback(() => {
+    const newId = `database-${Date.now()}`;
+    const newNode: Node<DatabaseNodeData> = {
+      id: newId,
+      type: 'database',
+      position: {
+        x: Math.random() * 300 + 100,
+        y: Math.random() * 200 + 100,
+      },
+      data: {
+        name: 'New Database',
+        description: 'A database connection',
+        databaseType: 'sqlite',
+        connectionString: 'sqlite://data.db',
+        maxConnections: 5,
+        timeoutSecs: 30,
+        readOnly: true,
+      },
+    };
+    setNodes((nds) => [...nds, newNode]);
+    setSelectedNodeId(newId);
+    setDatabaseModalOpen(true);
+  }, [setNodes]);
+
   // Save agent changes
   const handleSaveAgent = useCallback(
     (data: AgentNodeData) => {
@@ -307,7 +462,41 @@ function EditorPage({ user }: { user: AuthUser }) {
     [selectedNodeId, setNodes]
   );
 
-  // Delete node (agent or tool)
+  // Save REST API changes
+  const handleSaveRestApi = useCallback(
+    (data: RestApiNodeData) => {
+      if (!selectedNodeId) return;
+      setNodes((nds) =>
+        nds.map((node) =>
+          node.id === selectedNodeId
+            ? { ...node, data: { ...data } }
+            : node
+        )
+      );
+      setRestApiModalOpen(false);
+      setSelectedNodeId(null);
+    },
+    [selectedNodeId, setNodes]
+  );
+
+  // Save database changes
+  const handleSaveDatabase = useCallback(
+    (data: DatabaseNodeData) => {
+      if (!selectedNodeId) return;
+      setNodes((nds) =>
+        nds.map((node) =>
+          node.id === selectedNodeId
+            ? { ...node, data: { ...data } }
+            : node
+        )
+      );
+      setDatabaseModalOpen(false);
+      setSelectedNodeId(null);
+    },
+    [selectedNodeId, setNodes]
+  );
+
+  // Delete node (agent, tool, or database)
   const handleDeleteNode = useCallback(() => {
     if (!selectedNodeId) return;
     setNodes((nds) => nds.filter((node) => node.id !== selectedNodeId));
@@ -318,6 +507,8 @@ function EditorPage({ user }: { user: AuthUser }) {
     );
     setAgentModalOpen(false);
     setToolModalOpen(false);
+    setRestApiModalOpen(false);
+    setDatabaseModalOpen(false);
     setSelectedNodeId(null);
   }, [selectedNodeId, setNodes, setEdges]);
 
@@ -325,6 +516,8 @@ function EditorPage({ user }: { user: AuthUser }) {
   const exportConfig = useCallback((): SystemConfigJson => {
     const agentNodes = nodes.filter((n) => n.type === 'agent');
     const toolNodes = nodes.filter((n) => n.type === 'tool');
+    const restApiNodes = nodes.filter((n) => n.type === 'restapi');
+    const databaseNodes = nodes.filter((n) => n.type === 'database');
 
     // Build node positions map (keyed by agent/tool name)
     const nodePositions: Record<string, { x: number; y: number }> = {};
@@ -362,8 +555,10 @@ function EditorPage({ user }: { user: AuthUser }) {
             temperature: data.temperature,
             max_tokens: data.maxTokens,
           },
+          max_turns: data.maxTurns !== 1 ? data.maxTurns : undefined,
         },
         connections: Object.keys(connections).length > 0 ? connections : undefined,
+        entry_point: data.entryPoint || undefined,
       };
     });
 
@@ -412,6 +607,65 @@ function EditorPage({ user }: { user: AuthUser }) {
       };
     });
 
+    // Convert REST API nodes to ToolConfig (type: 'http')
+    const restApiTools: ToolConfig[] = restApiNodes.map((node) => {
+      const data = node.data as RestApiNodeData;
+
+      let bodyTemplate: Record<string, unknown> | undefined;
+      let parameters: Record<string, unknown> = {};
+
+      try {
+        if (data.bodyTemplate) {
+          bodyTemplate = JSON.parse(data.bodyTemplate);
+        }
+      } catch {
+        console.warn('Failed to parse body template JSON for REST API:', data.name);
+      }
+
+      try {
+        if (data.parameters) {
+          parameters = JSON.parse(data.parameters);
+        }
+      } catch {
+        console.warn('Failed to parse parameters JSON for REST API:', data.name);
+      }
+
+      return {
+        name: data.name,
+        description: data.description,
+        parameters,
+        endpoint: {
+          url: data.endpointUrl,
+          type: 'http' as EndpointType,
+          method: data.endpointMethod,
+          headers: Object.keys(data.headers).length > 0 ? data.headers : undefined,
+          body_template: bodyTemplate,
+        },
+        response_mapping: {
+          extract_path: data.extractPath || undefined,
+          format: data.responseFormat,
+        },
+        timeout_secs: data.timeoutSecs,
+      };
+    });
+
+    // Merge MCP tools and REST API tools
+    const allTools = [...tools, ...restApiTools];
+
+    // Convert database nodes to DatabaseConfig
+    const databases: DatabaseConfig[] = databaseNodes.map((node) => {
+      const data = node.data as DatabaseNodeData;
+      return {
+        name: data.name,
+        description: data.description,
+        connection_string: data.connectionString,
+        database_type: data.databaseType,
+        max_connections: data.maxConnections,
+        timeout_secs: data.timeoutSecs,
+        read_only: data.readOnly,
+      };
+    });
+
     return {
       system: { global_timeout_secs: 60 },
       llm_providers: {
@@ -422,7 +676,8 @@ function EditorPage({ user }: { user: AuthUser }) {
         },
       },
       agents,
-      tools: tools.length > 0 ? tools : undefined,
+      tools: allTools.length > 0 ? allTools : undefined,
+      databases: databases.length > 0 ? databases : undefined,
       editor_metadata: {
         node_positions: nodePositions,
       },
@@ -650,7 +905,8 @@ function EditorPage({ user }: { user: AuthUser }) {
         <MiniMap
           nodeColor={(node) => {
             if (node.type === 'tool') return '#f59e0b';
-            if ((node.data as AgentNodeData)?.routing) return '#a855f7';
+            if (node.type === 'restapi') return '#f43f5e';
+            if (node.type === 'database') return '#06b6d4';
             return '#3b82f6';
           }}
           maskColor="rgba(0, 0, 0, 0.1)"
@@ -692,23 +948,52 @@ function EditorPage({ user }: { user: AuthUser }) {
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
-            Add Agent
+            Agent
           </button>
-          <button
-            onClick={addTool}
-            className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-sm font-medium rounded-lg shadow-md hover:bg-amber-600 transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-              />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            Add Tool
-          </button>
+          <div className="w-px h-8 bg-zinc-600 self-center" />
+          {/* Resources group: Tool, REST API, Database */}
+          <div className="flex items-center gap-1 bg-zinc-800/60 rounded-lg p-1">
+            <button
+              onClick={addTool}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 text-white text-xs font-medium rounded-md shadow-sm hover:bg-amber-600 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              Tool
+            </button>
+            <button
+              onClick={addRestApi}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500 text-white text-xs font-medium rounded-md shadow-sm hover:bg-rose-600 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                />
+              </svg>
+              REST
+            </button>
+            <button
+              onClick={addDatabase}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 text-white text-xs font-medium rounded-md shadow-sm hover:bg-cyan-700 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <ellipse cx="12" cy="5" rx="9" ry="3" strokeWidth={2} />
+                <path strokeWidth={2} d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
+                <path strokeWidth={2} d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" />
+              </svg>
+              DB
+            </button>
+          </div>
           <button
             onClick={triggerImport}
             className="flex items-center gap-2 px-4 py-2 bg-zinc-600 text-white text-sm font-medium rounded-lg shadow-md hover:bg-zinc-700 transition-colors"
@@ -813,6 +1098,30 @@ function EditorPage({ user }: { user: AuthUser }) {
         onDelete={handleDeleteNode}
         onClose={() => {
           setToolModalOpen(false);
+          setSelectedNodeId(null);
+        }}
+      />
+
+      {/* REST API Edit Modal */}
+      <RestApiModal
+        isOpen={restApiModalOpen}
+        restApi={selectedRestApiData}
+        onSave={handleSaveRestApi}
+        onDelete={handleDeleteNode}
+        onClose={() => {
+          setRestApiModalOpen(false);
+          setSelectedNodeId(null);
+        }}
+      />
+
+      {/* Database Edit Modal */}
+      <DatabaseModal
+        isOpen={databaseModalOpen}
+        database={selectedDatabaseData}
+        onSave={handleSaveDatabase}
+        onDelete={handleDeleteNode}
+        onClose={() => {
+          setDatabaseModalOpen(false);
           setSelectedNodeId(null);
         }}
       />

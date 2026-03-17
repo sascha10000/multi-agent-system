@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct ForwardTarget {
     /// Name of the agent to forward to
     pub agent: String,
-    /// Message content to send
+    /// Message content to send (defaults to empty string if LLM omits it)
+    #[serde(default)]
     pub message: String,
 }
 
@@ -155,6 +156,104 @@ impl From<LlmDecisionJson> for HandlerDecision {
     fn from(json: LlmDecisionJson) -> Self {
         json.into_decision()
     }
+}
+
+/// A single turn in a multi-turn agent conversation
+#[derive(Debug, Clone)]
+pub struct ConversationTurn {
+    /// The agent that was spoken to
+    pub agent: String,
+    /// The message sent to the agent
+    pub message_sent: String,
+    /// The response received from the agent
+    pub response: String,
+    /// Which turn number this was (0-indexed)
+    pub turn_number: u16,
+}
+
+/// Decision from the evaluation step of a multi-turn conversation
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvaluationDecision {
+    /// The responses are sufficient; here is the final answer
+    Satisfied { response: String },
+    /// Need to ask follow-up questions to agents
+    FollowUp { targets: Vec<ForwardTarget> },
+}
+
+/// JSON structure for parsing LLM evaluation responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationJson {
+    /// Whether the agent is satisfied with the responses
+    #[serde(default)]
+    pub satisfied: bool,
+    /// Final response (when satisfied)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    /// Follow-up messages (when not satisfied)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<Vec<ForwardTarget>>,
+}
+
+/// Parse an LLM evaluation response into an EvaluationDecision
+pub fn parse_evaluation_response(response: &str) -> EvaluationDecision {
+    // Try to extract JSON from the response
+    if let Some(json_str) = extract_json_from_evaluation(response) {
+        if let Ok(eval) = serde_json::from_str::<EvaluationJson>(&json_str) {
+            if eval.satisfied {
+                return EvaluationDecision::Satisfied {
+                    response: eval.response.unwrap_or_default(),
+                };
+            }
+            if let Some(targets) = eval.follow_up {
+                if !targets.is_empty() {
+                    return EvaluationDecision::FollowUp { targets };
+                }
+            }
+        }
+    }
+
+    // Fallback: treat as satisfied with the raw text as response
+    EvaluationDecision::Satisfied {
+        response: response.trim().to_string(),
+    }
+}
+
+/// Extract a JSON object from an evaluation response (similar to extract_json_from_response)
+fn extract_json_from_evaluation(response: &str) -> Option<String> {
+    let response = response.trim();
+    let mut search_start = 0;
+
+    while let Some(start) = response[search_start..].find('{') {
+        let start = search_start + start;
+        let mut depth = 0;
+        let mut end = None;
+
+        for (i, c) in response[start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(end_pos) = end {
+            let json_str = &response[start..=end_pos];
+            if serde_json::from_str::<EvaluationJson>(json_str).is_ok() {
+                return Some(json_str.to_string());
+            }
+            search_start = end_pos + 1;
+        } else {
+            break;
+        }
+    }
+
+    None
 }
 
 /// Try to extract and merge JSON from LLM response that may contain extra text

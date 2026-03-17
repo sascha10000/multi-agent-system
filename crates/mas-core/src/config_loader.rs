@@ -41,6 +41,8 @@ use crate::config::SystemConfig;
 use crate::connection::Connection;
 use crate::errors::{AgentError, Result};
 use crate::llm::{CompletionOptions, LlmHandler, LlmProvider, OllamaProvider, RoutingBehavior};
+use crate::database::{Database, DatabaseConfig};
+use crate::database_handler::DatabaseHandler;
 use crate::tool::{Tool, ToolConfig};
 use crate::tool_handler::ToolHandler;
 
@@ -63,6 +65,9 @@ pub struct SystemConfigJson {
     /// Tool definitions (optional)
     #[serde(default)]
     pub tools: Vec<ToolConfig>,
+    /// Database definitions (optional)
+    #[serde(default)]
+    pub databases: Vec<DatabaseConfig>,
     /// Opaque metadata for the visual editor (node positions, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_metadata: Option<serde_json::Value>,
@@ -113,6 +118,9 @@ pub struct AgentConfig {
     /// Connections to other agents
     #[serde(default)]
     pub connections: HashMap<String, ConnectionConfig>,
+    /// Mark this agent as the entry point for chat messages
+    #[serde(default)]
+    pub entry_point: bool,
 }
 
 /// Handler configuration for an agent
@@ -134,6 +142,13 @@ pub struct HandlerConfig {
     /// Completion options
     #[serde(default)]
     pub options: CompletionOptionsConfig,
+    /// Maximum conversation turns with other agents (0 = unlimited, 1 = single turn default)
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u16,
+}
+
+fn default_max_turns() -> u16 {
+    1
 }
 
 /// Completion options for LLM calls
@@ -216,6 +231,18 @@ pub enum ConfigError {
 
     #[error("Tool '{0}' has invalid endpoint URL: {1}")]
     InvalidToolEndpoint(String, String),
+
+    #[error("Duplicate database name: {0}")]
+    DuplicateDatabaseName(String),
+
+    #[error("Database name '{0}' conflicts with agent or tool name")]
+    DatabaseNameConflict(String),
+
+    #[error("Database '{0}' has empty connection string")]
+    EmptyConnectionString(String),
+
+    #[error("Database connection error: {0}")]
+    DatabaseConnectionError(String),
 }
 
 impl From<ConfigError> for AgentError {
@@ -266,11 +293,26 @@ pub fn validate_config(config: &SystemConfigJson) -> std::result::Result<(), Con
         }
     }
 
-    // Combined set of all valid targets (agents + tools)
+    // Validate databases
+    let mut db_names: HashSet<String> = HashSet::new();
+    for db in &config.databases {
+        if !db_names.insert(db.name.clone()) {
+            return Err(ConfigError::DuplicateDatabaseName(db.name.clone()));
+        }
+        if agent_names.contains(&db.name) || tool_names.contains(&db.name) {
+            return Err(ConfigError::DatabaseNameConflict(db.name.clone()));
+        }
+        if db.connection_string.is_empty() {
+            return Err(ConfigError::EmptyConnectionString(db.name.clone()));
+        }
+    }
+
+    // Combined set of all valid targets (agents + tools + databases)
     let all_targets: HashSet<&str> = agent_names
         .iter()
         .map(|s| s.as_str())
         .chain(tool_names.iter().map(|s| s.as_str()))
+        .chain(db_names.iter().map(|s| s.as_str()))
         .collect();
 
     // Validate connections (second pass - need all agent and tool names first)
@@ -374,9 +416,10 @@ pub async fn load_system_from_json(json_path: &Path) -> Result<Arc<AgentSystem>>
     // Validate configuration
     validate_config(&config)?;
     info!(
-        "Configuration validated: {} agents, {} tools, {} providers",
+        "Configuration validated: {} agents, {} tools, {} databases, {} providers",
         config.agents.len(),
         config.tools.len(),
+        config.databases.len(),
         config.llm_providers.len()
     );
 
@@ -389,16 +432,32 @@ pub async fn load_system_from_json(json_path: &Path) -> Result<Arc<AgentSystem>>
     // Create the agent system (wrapped in Arc for routing agents)
     let system = Arc::new(AgentSystem::new(system_config));
 
-    // Build tool descriptions map for LLM routing
-    let tool_descriptions: HashMap<String, String> = config
+    // Build tool/database descriptions map for LLM routing
+    let mut tool_descriptions: HashMap<String, String> = config
         .tools
         .iter()
         .map(|t| (t.name.clone(), t.description.clone()))
         .collect();
 
+    // Add database descriptions (agents need to know they can send SQL queries)
+    for db_config in &config.databases {
+        tool_descriptions.insert(
+            db_config.name.clone(),
+            format!(
+                "SQL Database: {}. Send SQL queries as messages to get CSV-formatted results back.",
+                db_config.description
+            ),
+        );
+    }
+
     // Register all tools first (so agents can connect to them)
     for tool_config in &config.tools {
         register_tool_from_config(&system, tool_config).await?;
+    }
+
+    // Register all databases (so agents can connect to them)
+    for db_config in &config.databases {
+        register_database_from_config(&system, db_config).await?;
     }
 
     // Register all agents (with tool descriptions for routing)
@@ -427,6 +486,29 @@ async fn register_tool_from_config(system: &AgentSystem, config: &ToolConfig) ->
 
     system.register_tool(tool, handler).await?;
     debug!("Registered tool '{}' -> {}", config.name, config.endpoint.url);
+
+    Ok(())
+}
+
+/// Register a database from its configuration
+async fn register_database_from_config(
+    system: &AgentSystem,
+    config: &DatabaseConfig,
+) -> Result<()> {
+    let database = Arc::new(Database::new(config.clone()));
+    let handler = Arc::new(
+        DatabaseHandler::new(database.clone())
+            .await
+            .map_err(|e| AgentError::ConfigError(e))?,
+    );
+
+    system.register_database(database, handler).await?;
+    debug!(
+        "Registered database '{}' (type={}, read_only={})",
+        config.name,
+        config.database_type,
+        config.read_only.unwrap_or(false)
+    );
 
     Ok(())
 }
@@ -472,8 +554,9 @@ async fn register_agent_from_config(
         })?
         .clone();
 
-    // Build the handler
-    let mut handler = LlmHandler::new(provider);
+    // Build the handler with shared conversation store for history
+    let mut handler = LlmHandler::new(provider)
+        .with_conversation_store(system.conversation_store());
 
     // Apply model override
     if let Some(model) = &config.handler.model {
@@ -515,7 +598,8 @@ async fn register_agent_from_config(
         handler = handler
             .with_routing()
             .with_routing_behavior(config.handler.routing_behavior)
-            .with_tool_descriptions(connected_tool_descriptions);
+            .with_tool_descriptions(connected_tool_descriptions)
+            .with_max_turns(config.handler.max_turns);
         debug!(
             "Registering '{}' as routing agent with behavior {:?} (auto={}, explicit={})",
             config.name, config.handler.routing_behavior, has_blocking_connections, config.handler.routing

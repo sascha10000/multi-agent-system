@@ -16,6 +16,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+sqlx = { workspace = true }
 
 # Optional: memvid for semantic search (requires ffmpeg + working bindgen)
 # Enable with: cargo build --features memvid

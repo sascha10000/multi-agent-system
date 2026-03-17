@@ -260,7 +260,8 @@ impl ToolHandler {
         let endpoint = &self.tool.config.endpoint;
 
         // Build URL with substitutions
-        let url = self.substitute_placeholders(&endpoint.url, &string_params);
+        let mut url = self.substitute_placeholders(&endpoint.url, &string_params);
+
         debug!("[{}] Making {} request to: {}", self.tool.name(), endpoint.method, url);
 
         // Build request
@@ -271,6 +272,16 @@ impl ToolHandler {
             HttpMethod::DELETE => self.client.delete(&url),
             HttpMethod::PATCH => self.client.patch(&url),
         };
+
+        // For GET requests, auto-append parameters as query string if the URL
+        // doesn't already contain ${...} placeholders for them
+        if endpoint.method == HttpMethod::GET && !string_params.is_empty() {
+            let has_placeholders = endpoint.url.contains("${");
+            if !has_placeholders {
+                let query_pairs: Vec<(&String, &String)> = string_params.iter().collect();
+                request = request.query(&query_pairs);
+            }
+        }
 
         // Add headers with substitutions
         for (key, value) in &endpoint.headers {

@@ -3,7 +3,7 @@ use crate::agent::Agent;
 use crate::agent_system::{MessageHandler, RoutingHandler};
 use crate::connection::ConnectionType;
 use crate::conversation::ConversationStore;
-use crate::decision::{parse_llm_response, HandlerDecision};
+use crate::decision::{parse_evaluation_response, parse_llm_response, ConversationTurn, EvaluationDecision, HandlerDecision};
 use crate::message::Message;
 
 use async_trait::async_trait;
@@ -55,6 +55,8 @@ pub struct LlmHandler {
     /// Descriptions for connected tools (name -> description)
     /// Used to enrich the routing prompt with tool capabilities
     tool_descriptions: std::collections::HashMap<String, String>,
+    /// Maximum conversation turns with other agents (0 = unlimited, 1 = single turn)
+    max_turns: u16,
 }
 
 impl LlmHandler {
@@ -68,6 +70,7 @@ impl LlmHandler {
             routing_enabled: false,
             routing_behavior: RoutingBehavior::default(),
             tool_descriptions: std::collections::HashMap::new(),
+            max_turns: 1,
         }
     }
 
@@ -117,6 +120,14 @@ impl LlmHandler {
     /// what each tool does and can make informed routing decisions.
     pub fn with_tool_descriptions(mut self, descriptions: std::collections::HashMap<String, String>) -> Self {
         self.tool_descriptions = descriptions;
+        self
+    }
+
+    /// Set the maximum number of conversation turns with other agents
+    ///
+    /// 0 = unlimited turns, 1 = single turn (default, current behavior)
+    pub fn with_max_turns(mut self, max_turns: u16) -> Self {
+        self.max_turns = max_turns;
         self
     }
 
@@ -364,6 +375,49 @@ RULES:
         messages
     }
 
+    /// Build LLM messages for evaluation (multi-turn: should the agent follow up?)
+    fn build_evaluation_messages(
+        &self,
+        original_message: &Message,
+        conversation_turns: &[ConversationTurn],
+        agent: &Agent,
+    ) -> Vec<LlmMessage> {
+        let mut messages = Vec::new();
+
+        // System prompt for evaluation
+        let eval_prompt = format!(
+            "{}\n\n\
+            You are evaluating whether you have enough information to answer the original question.\n\
+            You have been having a conversation with other agents. Review the conversation below and decide:\n\n\
+            If you have enough information to give a complete answer, respond with:\n\
+            {{ \"satisfied\": true, \"response\": \"your final comprehensive answer here\" }}\n\n\
+            If you need to ask follow-up questions, respond with:\n\
+            {{ \"satisfied\": false, \"follow_up\": [{{ \"agent\": \"AgentName\", \"message\": \"your follow-up question\" }}] }}\n\n\
+            ONLY output valid JSON. No other text.",
+            agent.system_prompt
+        );
+        messages.push(LlmMessage::system(&eval_prompt));
+
+        // Original request
+        messages.push(LlmMessage::user(&format!(
+            "Original question: {}",
+            original_message.content
+        )));
+
+        // Build conversation history
+        let mut history = String::from("Conversation so far:\n");
+        for turn in conversation_turns {
+            history.push_str(&format!(
+                "\n[Turn {}] You asked {}: {}\n[Turn {}] {} replied: {}\n",
+                turn.turn_number, turn.agent, turn.message_sent,
+                turn.turn_number, turn.agent, turn.response,
+            ));
+        }
+        messages.push(LlmMessage::user(&history));
+
+        messages
+    }
+
     /// Enforce "all" routing behavior by ensuring all blocking connections are forwarded to
     ///
     /// When routing_behavior is All, we must forward to every blocking connection regardless
@@ -602,6 +656,32 @@ impl RoutingHandler for LlmHandler {
             }
         }
     }
+
+    async fn evaluate(
+        &self,
+        original_message: &Message,
+        conversation_turns: &[ConversationTurn],
+        agent: &Agent,
+    ) -> EvaluationDecision {
+        let messages = self.build_evaluation_messages(original_message, conversation_turns, agent);
+
+        match self.call_llm(&messages).await {
+            Ok(content) => {
+                info!("[{}] Evaluation response: {}", agent.name, content);
+                parse_evaluation_response(&content)
+            }
+            Err(e) => {
+                warn!("[{}] Evaluation LLM call failed: {}, treating as satisfied", agent.name, e);
+                EvaluationDecision::Satisfied {
+                    response: String::new(),
+                }
+            }
+        }
+    }
+
+    fn max_turns(&self) -> u16 {
+        self.max_turns
+    }
 }
 
 /// Builder for creating LLM handlers with fluent API
@@ -613,6 +693,7 @@ pub struct LlmHandlerBuilder {
     routing_enabled: bool,
     routing_behavior: RoutingBehavior,
     tool_descriptions: std::collections::HashMap<String, String>,
+    max_turns: u16,
 }
 
 impl LlmHandlerBuilder {
@@ -625,6 +706,7 @@ impl LlmHandlerBuilder {
             routing_enabled: false,
             routing_behavior: RoutingBehavior::default(),
             tool_descriptions: std::collections::HashMap::new(),
+            max_turns: 1,
         }
     }
 
@@ -668,6 +750,12 @@ impl LlmHandlerBuilder {
         self
     }
 
+    /// Set maximum conversation turns (0 = unlimited, 1 = single turn)
+    pub fn max_turns(mut self, max_turns: u16) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
     pub fn build(self) -> LlmHandler {
         LlmHandler {
             provider: self.provider,
@@ -677,6 +765,7 @@ impl LlmHandlerBuilder {
             routing_enabled: self.routing_enabled,
             routing_behavior: self.routing_behavior,
             tool_descriptions: self.tool_descriptions,
+            max_turns: self.max_turns,
         }
     }
 }

@@ -1,0 +1,52 @@
+{
+  "system": {
+    "global_timeout_secs": 60
+  },
+  "llm_providers": {
+    "default": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "default_model": "llama3.2"
+    }
+  },
+  "agents": [
+    {
+      "name": "DataAnalyst",
+      "system_prompt": "You are a data analyst. You have access to a SQL database. To query it, send SQL SELECT queries to the AppDB connection. The results come back as CSV. Analyze the data and answer the user's questions. Always show the relevant data in your response.",
+      "handler": {
+        "provider": "default",
+        "model": "llama3.2",
+        "routing": true,
+        "routing_behavior": "direct_first",
+        "options": {
+          "temperature": 0.3,
+          "max_tokens": 2000
+        }
+      },
+      "connections": {
+        "AppDB": {
+          "type": "blocking",
+          "timeout_secs": 30
+        }
+      }
+    }
+  ],
+  "databases": [
+    {
+      "name": "AppDB",
+      "description": "Application SQLite database. Send SQL queries to get CSV results.",
+      "connection_string": "sqlite://data/app.db",
+      "database_type": "sqlite",
+      "read_only": true,
+      "max_connections": 5,
+      "timeout_secs": 30
+    }
+  ],
+  "tools": [],
+  "editor_metadata": {
+    "node_positions": {
+      "DataAnalyst": { "x": 300, "y": 50 },
+      "AppDB": { "x": 300, "y": 280 }
+    }
+  }
+}
